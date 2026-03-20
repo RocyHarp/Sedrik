@@ -44,21 +44,18 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
-    # Звіти (Продано)
     c.execute('''
         CREATE TABLE IF NOT EXISTS trades (
             id SERIAL PRIMARY KEY, date TEXT, set_name TEXT, 
             strategy TEXT, cost INTEGER, profit INTEGER
         )
     ''')
-    # Портфель (Активні лоти)
     c.execute('''
         CREATE TABLE IF NOT EXISTS portfolio (
             id SERIAL PRIMARY KEY, date TEXT, item_name TEXT, 
             buy_price INTEGER, target_price INTEGER
         )
     ''')
-    # БІБЛІОТЕКА СЕТІВ (Збережені склади)
     c.execute('''
         CREATE TABLE IF NOT EXISTS library (
             id SERIAL PRIMARY KEY, set_name TEXT UNIQUE, hero TEXT, 
@@ -89,7 +86,6 @@ def add_to_portfolio(item_name, buy_price, target_price):
 def add_to_library(set_name, hero, rarity, image_url, components):
     conn = get_db_connection()
     c = conn.cursor()
-    # Перевіряємо, чи такий сет вже є
     c.execute("SELECT id FROM library WHERE set_name = %s", (set_name,))
     if not c.fetchone():
         c.execute('''
@@ -168,7 +164,7 @@ def get_full_set_info(exact_page_name: str) -> dict:
     except: pass
     return result
 
-@st.cache_data(ttl=300, show_spinner=False) # Пам'ятає ціни 5 хвилин для швидкого оновлення
+@st.cache_data(ttl=300, show_spinner=False)
 def get_steam_price_data(item_name: str, app_id: int) -> dict:
     url = f"https://steamcommunity.com/market/priceoverview/?appid={app_id}&currency={CURRENCY_UAH}&market_hash_name={urllib.parse.quote(item_name)}"
     result = {"price": 0, "volume": 0, "median": 0}
@@ -185,13 +181,11 @@ def get_steam_price_data(item_name: str, app_id: int) -> dict:
                     result["volume"] = int(data["volume"].replace(",", "")) * 7
                 elif app_id == STEAM_APP_ID_CS2 and "volume" in data:
                     result["volume"] = int(data["volume"].replace(",", ""))
-        time.sleep(1.3) # Захист від бану Steam API
+        time.sleep(1.3)
     except: pass
     return result
 
-# --- ФУНКЦІЯ МАЛЮВАННЯ ДАШБОРДУ DOTA (ЩОБ НЕ ДУБЛЮВАТИ КОД) ---
 def render_dota_dashboard(res, prefix_key="scan"):
-    """Малює картинку, інформацію, кнопки і стратегії для знайденого сету."""
     col_img, col_info = st.columns([1, 3])
     with col_img:
         if res['set_info']["image_url"]:
@@ -205,7 +199,6 @@ def render_dota_dashboard(res, prefix_key="scan"):
         st.subheader(f"📦 {res['exact_name']}")
         st.markdown(f"**🧙‍♂️ Герой:** `{res['set_info']['hero']}` | **💎 Рідкість:** `{res['set_info']['rarity']}`")
         
-        # КНОПКИ ПОРУЧ
         col_link, col_lib = st.columns(2)
         with col_link:
             st.markdown(f"<a href='{get_steam_client_url(res['exact_name'], STEAM_APP_ID_DOTA)}' style='display: inline-block; padding: 8px 15px; background-color: #1a2838; color: #66c0f4; text-decoration: none; border-radius: 5px; border: 1px solid #101822; width: 100%; text-align: center;'>Відкрити бандл у Steam 🔗</a>", unsafe_allow_html=True)
@@ -284,7 +277,7 @@ def render_dota_dashboard(res, prefix_key="scan"):
 # ==========================================
 with st.sidebar:
     st.title("🛠 Sedrik Multi-Tool")
-    st.markdown("`v11.0 | Library Edition`")
+    st.markdown("`v11.1 | Smart Timer Edition`")
     st.divider()
     menu_choice = st.radio("РОЗДІЛИ:", ["🔍 Dota 2 Сканер", "📚 Бібліотека", "🔫 CS2 Скан", "💼 Портфель", "📊 Звіти (База)"])
     st.divider()
@@ -348,7 +341,6 @@ if menu_choice == "🔍 Dota 2 Сканер":
 # ==========================================
 elif menu_choice == "📚 Бібліотека":
     st.header("📚 Твоя Бібліотека Сетів")
-    st.markdown("Збережені сети. Оновлення цін звідси працює **моментально**, бо ми пропускаємо Liquipedia!")
     
     conn = get_db_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -380,7 +372,6 @@ elif menu_choice == "📚 Бібліотека":
             with st.spinner("Швидке сканування Steam..."):
                 components = json.loads(selected_set['components'])
                 
-                # Відновлюємо set_info з бази
                 set_info = {
                     "hero": selected_set['hero'],
                     "rarity": selected_set['rarity'],
@@ -393,7 +384,6 @@ elif menu_choice == "📚 Бібліотека":
                 total_parts_price = 0
                 total_parts_clean_income = 0
                 
-                # Швидкий цикл
                 my_bar = st.progress(0)
                 for i, item in enumerate(components):
                     data = get_steam_price_data(item, STEAM_APP_ID_DOTA)
@@ -408,16 +398,31 @@ elif menu_choice == "📚 Бібліотека":
                     my_bar.progress((i + 1) / len(components))
                 my_bar.empty()
                 
+                # Додаємо мітку часу оновлення
                 st.session_state.lib_result = {
                     "exact_name": selected_set_name, "set_info": set_info, "bundle_data": bundle_data,
                     "parts_data": parts_data, "total_parts_price": total_parts_price,
-                    "total_parts_clean_income": total_parts_clean_income
+                    "total_parts_clean_income": total_parts_clean_income,
+                    "last_updated": datetime.now() # ФІКСАЦІЯ ЧАСУ
                 }
                 st.toast("✅ Ціни оновлено!")
 
-        # Якщо є збережений результат для ЦЬОГО сету - малюємо дашборд
+        # ВІДОБРАЖЕННЯ ДАШБОРДУ І ТАЙМЕРА
         if st.session_state.lib_result and st.session_state.lib_result['exact_name'] == selected_set_name:
             st.divider()
+            
+            # --- ЛОГІКА ТАЙМЕРА ---
+            last_upd = st.session_state.lib_result.get('last_updated', datetime.now())
+            delta_sec = (datetime.now() - last_upd).total_seconds()
+            mins_passed = int(delta_sec / 60)
+            
+            if mins_passed >= 30:
+                st.error(f"⚠️ Увага! Ці дані оновлювались **{mins_passed} хв тому**. Вони вже можуть бути НЕ АКТУАЛЬНІ. Натисни 'Оновити ціни' ще раз.")
+            else:
+                time_str = "Щойно" if mins_passed == 0 else f"{mins_passed} хв тому"
+                st.info(f"⏱ **Останнє оновлення цін:** {time_str} ({last_upd.strftime('%H:%M:%S')})")
+            # -----------------------
+            
             render_dota_dashboard(st.session_state.lib_result, prefix_key="lib")
 
 # ==========================================
