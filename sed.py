@@ -8,6 +8,7 @@ from psycopg2.extras import RealDictCursor
 import pandas as pd
 from datetime import datetime
 import json
+import os
 
 # --- НАЛАШТУВАННЯ СТОРІНКИ ---
 st.set_page_config(
@@ -33,6 +34,8 @@ if 'dota_result' not in st.session_state:
     st.session_state.dota_result = None
 if 'lib_result' not in st.session_state:
     st.session_state.lib_result = None
+if 'scan_count' not in st.session_state:
+    st.session_state.scan_count = 0  # Наш лічильник для пасхалки!
 
 # --- БАЗА ДАНИХ (NEON) ---
 def get_db_connection():
@@ -243,7 +246,7 @@ def render_trading_logic(res, prefix_key="dash"):
 # ==========================================
 with st.sidebar:
     st.title("🛠 Sedrik Dota Tool")
-    st.markdown("`v13.0 | Premium Design Edition`")
+    st.markdown("`v13.1 | Easter Egg Edition`")
     st.divider()
     menu_choice = st.radio("НАВІГАЦІЯ:", ["🔍 Сканер Сетів", "📚 Бібліотека", "💼 Портфель", "📊 Звіти (База)"])
     st.divider()
@@ -271,6 +274,9 @@ if menu_choice == "🔍 Сканер Сетів":
         if not items:
             st.error(f"Не вдалося знайти деталі для '{exact_name}'. Перевір правильність назви.")
         else:
+            # ПАСХАЛКА: Збільшуємо лічильник успішних сканів!
+            st.session_state.scan_count += 1
+            
             with st.sidebar:
                 bundle_data = get_steam_price_data(exact_name)
                 parts_data = []
@@ -304,14 +310,25 @@ if menu_choice == "🔍 Сканер Сетів":
         
         with st.container(border=True):
             col_img, col_info = st.columns([1, 3])
+            
+            # --- ЛОГІКА ВІДОБРАЖЕННЯ ФОТО (І ПАСХАЛКИ) ---
             with col_img:
-                if res['set_info']["image_url"]:
+                # Перевіряємо чи це кожен 10-й скан
+                if st.session_state.scan_count > 0 and st.session_state.scan_count % 10 == 0:
+                    if os.path.exists("easter_egg.jpg"):
+                        st.image("easter_egg.jpg", use_container_width=True)
+                        st.caption("✨ Опа, пасхалочка! Гарного дня!")
+                    else:
+                        st.info("📷 Пасхалка не знайдена (закинь файл easter_egg.jpg на GitHub)")
+                # Якщо ні - показуємо звичайне фото сету
+                elif res['set_info']["image_url"]:
                     try:
                         img_res = requests.get(res['set_info']["image_url"], headers=HEADERS, timeout=5)
                         if img_res.status_code == 200: st.image(img_res.content, use_container_width=True)
                         else: st.info("📷 Помилка фото")
                     except: st.info("📷 Помилка фото")
                 else: st.info("📷 Фото не знайдено")
+            # ---------------------------------------------
                     
             with col_info:
                 st.subheader(f"📦 {res['exact_name']}")
@@ -321,17 +338,16 @@ if menu_choice == "🔍 Сканер Сетів":
                 with col_link:
                     st.markdown(f"<a href='{get_steam_client_url(res['exact_name'])}' style='display: inline-block; padding: 6px 15px; background-color: #1a2838; color: #66c0f4; text-decoration: none; border-radius: 4px; border: 1px solid #101822; width: 100%; text-align: center; font-weight: bold;'>Відкрити бандл у Steam 🔗</a>", unsafe_allow_html=True)
                 with col_lib:
-                    # При збереженні записуємо і назви, і свіжі ціни
                     components_to_save = [{"name": p['Деталь'], "last_price": p['Ціна']} for p in res['parts_data']]
                     if st.button("📚 Зберегти в Бібліотеку", key="btn_lib_scan", use_container_width=True):
                         add_to_library(res['exact_name'], res['set_info']['hero'], res['set_info']['rarity'], res['set_info']['image_url'], components_to_save)
                         st.success("✅ Збережено назавжди!")
 
-        st.write("") # Відступ
+        st.write("")
         render_trading_logic(res, prefix_key="scan")
 
 # ==========================================
-# СТОРІНКА 2: БІБЛІОТЕКА СЕТІВ (v13 ДИЗАЙН)
+# СТОРІНКА 2: БІБЛІОТЕКА СЕТІВ
 # ==========================================
 elif menu_choice == "📚 Бібліотека":
     st.header("📚 Бібліотека Сетів")
@@ -353,12 +369,10 @@ elif menu_choice == "📚 Бібліотека":
         components_raw = json.loads(selected_set['components'])
         components_names = [comp['name'] if isinstance(comp, dict) else comp for comp in components_raw]
         
-        # Рахуємо приблизну стару вартість (якщо ціни зберігались)
         old_total_value = sum([comp.get('last_price', 0) for comp in components_raw if isinstance(comp, dict)])
         
-        st.write("") # Відступ
+        st.write("")
         
-        # КАРТКА СЕТУ (Новий крутий дизайн)
         with st.container(border=True):
             col_img, col_details = st.columns([1, 2.5])
             
@@ -371,7 +385,6 @@ elif menu_choice == "📚 Бібліотека":
                     except: st.info("📷 Помилка фото")
             
             with col_details:
-                # Назва і кнопка видалення в один рядок
                 head_col1, head_col2 = st.columns([4, 1])
                 with head_col1:
                     st.subheader(selected_set['set_name'])
@@ -389,7 +402,6 @@ elif menu_choice == "📚 Бібліотека":
                     st.markdown(f"💸 **Остання відома сумарна вартість деталей:** `{old_total_value} ₴`")
                 
                 with st.expander(f"📦 Склад сету ({len(components_names)} шт.) - Старі ціни"):
-                    # Робимо красиву міні-табличку для старих цін
                     old_table = "<table style='width:100%; border-collapse: collapse;'><tr><th style='border-bottom: 1px solid #444; padding: 4px; text-align: left;'>Деталь</th><th style='border-bottom: 1px solid #444; padding: 4px; text-align: right;'>Остання ціна</th></tr>"
                     for comp in components_raw:
                         if isinstance(comp, str):
@@ -401,10 +413,7 @@ elif menu_choice == "📚 Бібліотека":
 
         st.write("")
         
-        # БЛОК ОНОВЛЕННЯ (Центральний акцент)
         has_cached_data = (st.session_state.lib_result and st.session_state.lib_result['exact_name'] == selected_set_name)
-        
-        # Велика кнопка оновлення
         update_btn = st.button("🔄 Отримати свіжі ціни маркету", type="primary", use_container_width=True)
         
         if has_cached_data:
@@ -416,7 +425,6 @@ elif menu_choice == "📚 Бібліотека":
                 time_str = "Щойно" if mins_passed == 0 else f"{mins_passed} хв тому"
                 st.caption(f"✅ Ціни актуальні (Оновлено: {time_str})")
 
-        # Логіка парсингу при натисканні
         if update_btn:
             with st.spinner("Зв'язуюсь зі Steam... Це займе кілька секунд."):
                 bundle_data = get_steam_price_data(selected_set_name)
@@ -441,7 +449,6 @@ elif menu_choice == "📚 Бібліотека":
                     my_bar.progress((i + 1) / len(components_names))
                 my_bar.empty()
                 
-                # Перезаписуємо склад сету в базу з НОВИМИ цінами
                 conn = get_db_connection()
                 c = conn.cursor()
                 c.execute("UPDATE library SET components = %s WHERE id = %s", (json.dumps(updated_components_for_db), selected_set['id']))
@@ -457,7 +464,6 @@ elif menu_choice == "📚 Бібліотека":
                 }
                 st.rerun()
 
-        # Якщо є свіжі дані — виводимо торговий термінал
         if has_cached_data:
             render_trading_logic(st.session_state.lib_result, prefix_key="lib_dash")
 
