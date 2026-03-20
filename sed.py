@@ -314,7 +314,7 @@ if menu_choice == "🔍 Сканер Сетів":
             # --- ЛОГІКА ВІДОБРАЖЕННЯ ФОТО (І ПАСХАЛКИ) ---
             with col_img:
                 # Перевіряємо чи це кожен 10-й скан
-                if st.session_state.scan_count > 0 and st.session_state.scan_count % 10 == 0:
+                if st.session_state.scan_count > 0 and st.session_state.scan_count % 2 == 0:
                     if os.path.exists("easter_egg.jpg"):
                         st.image("easter_egg.jpg", use_container_width=True)
                         st.caption("✨ Опа, пасхалочка! Гарного дня!")
