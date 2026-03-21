@@ -35,6 +35,10 @@ session.cookies.set('steamCurrencyId', str(CURRENCY_UAH), domain='steamcommunity
 if 'dota_result' not in st.session_state: st.session_state.dota_result = None
 if 'lib_result' not in st.session_state: st.session_state.lib_result = None
 
+if 'preview_sets' not in st.session_state: st.session_state.preview_sets = []
+elif st.session_state.preview_sets and not isinstance(st.session_state.preview_sets[0], dict): st.session_state.preview_sets = []
+elif st.session_state.preview_sets and 'name' not in st.session_state.preview_sets[0]: st.session_state.preview_sets = []
+
 # --- БАЗА ДАНИХ (NEON) ---
 def get_db_connection():
     return psycopg2.connect(st.secrets["DB_URL"])
@@ -74,8 +78,9 @@ def add_to_library(set_name, hero, rarity, image_url, components):
 
 init_db()
 
-# --- ДОПОМІЖНІ ФУНКЦІЇ ---
+# --- ДОПОМІЖНІ ФУНКЦІЇ (КЛАСИЧНА МАТЕМАТИКА STEAM) ---
 def get_clean_income(market_price: float) -> int:
+    """Точно вираховує чистий дохід, знімаючи мінімум 2 грн, тому 3 грн -> 1 грн"""
     market_price = int(market_price)
     if market_price <= 0: return 0
     for base in range(market_price, 0, -1):
@@ -112,6 +117,47 @@ def get_safe_image_bytes(url):
             return res.content
     except: pass
     return None
+
+# --- СУПЕР-ПАРСЕР СЕТІВ ЗІ STEAM ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_steam_market_data():
+    sets_list = []
+    global_junk = ['music', 'announcer', 'hud', 'loading screen', 'cursor', 'league', 'ticket', 'emoticon', 'roshan', 'weather', 'ward', 'taunt', 'tournament']
+    
+    for page in range(5):
+        url = f"https://steamcommunity.com/market/search/render/?query=&start={page*100}&count=100&search_descriptions=0&sort_column=popular&sort_dir=desc&appid=570&category_570_Type%5B%5D=tag_bundle&l=english"
+        try:
+            res = session.get(url, timeout=10).json()
+            soup = BeautifulSoup(res.get("results_html", ""), "html.parser")
+            rows = soup.find_all("a", class_="market_listing_row_link")
+            
+            for row in rows:
+                name_tag = row.find("span", class_="market_listing_item_name")
+                if not name_tag: continue
+                raw_name = name_tag.get_text(strip=True)
+                clean_name = raw_name.replace(" Bundle", "").replace(" Set", "")
+                
+                if any(junk in clean_name.lower() for junk in global_junk): continue
+
+                price_val = 0
+                price_span = row.find("span", class_="sale_price") or row.find("span", class_="normal_price")
+                if price_span:
+                    p_clean = "".join([c for c in price_span.get_text(strip=True) if c.isdigit() or c in [',', '.']])
+                    p_clean = p_clean.replace(',', '.')
+                    if p_clean: price_val = int(float(p_clean))
+                    
+                img_url = None
+                img_tag = row.find("img", class_="market_listing_item_img")
+                if img_tag and img_tag.has_attr("src"):
+                    img_url = img_tag["src"].replace("/96fx96f", "").replace("/62fx62f", "")
+
+                if price_val > 0:
+                    sets_list.append({"name": clean_name, "price": price_val, "image_url": img_url})
+        except: pass
+        time.sleep(1)
+        
+    unique_sets = {v['name']:v for v in sets_list}.values()
+    return list(unique_sets)
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def search_correct_page_name(query: str) -> str:
@@ -160,7 +206,6 @@ def get_full_set_info(exact_page_name: str) -> dict:
                         name = tag.get_text(strip=True)
                         name_lower = name.lower()
                         is_junk = any(stop_word in name_lower for stop_word in stop_words)
-                        
                         if (len(name) > 2 and "edit" not in name_lower and "modifier" not in name_lower and 
                             name_lower != exact_page_name.lower() and name not in result["components"] and not is_junk):
                             result["components"].append(name)
@@ -204,11 +249,9 @@ def render_trading_logic(res, prefix_key="dash"):
                 for item in items:
                     d = get_steam_price_data(item)
                     c = get_clean_income(d['price'])
-                    res['parts_data'].append({
-                        "Деталь": item, "Ціна": d['price'], "Чистими": c, 
-                        "Продажі": d['volume'], "Link": get_steam_client_url(item)
-                    })
-                    t_p += d['price']; t_c += c
+                    res['parts_data'].append({"Деталь": item, "Ціна": d['price'], "Чистими": c, "Продажі": d['volume'], "Link": get_steam_client_url(item)})
+                    t_p += d['price']
+                    t_c += c
                 res['total_parts_price'] = t_p
                 res['total_parts_clean_income'] = t_c
             st.rerun()
@@ -218,7 +261,7 @@ def render_trading_logic(res, prefix_key="dash"):
     with tab1:
         col_in1, col_in2 = st.columns(2)
         user_buy_price = col_in1.number_input("За скільки КУПИВ всі частини (сума ₴):", value=int(res['total_parts_price']), step=1, key=f"buy_pack_{safe_key}")
-        user_sell_price = col_in2.number_input("Ціна продажу цілого бандлу (брутто ₴):", value=int(res['bundle_data']['price']), step=1, key=f"sell_pack_{safe_key}")
+        user_sell_price = col_in2.number_input("За скільки ПРОДАШ цілий бандл (брутто ₴):", value=int(res['bundle_data']['price']), step=1, key=f"sell_pack_{safe_key}")
         
         actual_bundle_income = get_clean_income(user_sell_price)
         actual_pack_profit = actual_bundle_income - user_buy_price
@@ -243,11 +286,11 @@ def render_trading_logic(res, prefix_key="dash"):
     with tab2:
         col_in1, col_in2 = st.columns(2)
         user_bundle_buy = col_in1.number_input("За скільки КУПИВ цілий бандл (₴):", value=int(res['bundle_data']['price']), step=1, key=f"buy_unpack_{safe_key}")
-        actual_parts_income = col_in2.number_input("Сума ЧИСТИХ доходів з деталей (₴):", value=int(res['total_parts_clean_income']), step=1, key=f"sell_unpack_norm_{safe_key}")
+        actual_parts_income = col_in2.number_input("Твій сумарний ЧИСТИЙ дохід з деталей (₴):", value=int(res['total_parts_clean_income']), step=1, key=f"sell_unpack_norm_{safe_key}")
         
         actual_unpack_profit = actual_parts_income - user_bundle_buy
         
-        st.info(f"Сума чистого доходу (збереться з колонки 'Тобі'): **{actual_parts_income} ₴**")
+        st.info(f"Сума чистого доходу береться з колонки 'Тобі' для кожної деталі: **{actual_parts_income} ₴**")
         
         if actual_unpack_profit > 0: st.metric("Чистий Профіт", f"{actual_unpack_profit} ₴", delta="Вигідно")
         else: st.metric("Чистий Профіт", f"{actual_unpack_profit} ₴", delta="Збиток", delta_color="inverse")
@@ -265,7 +308,7 @@ def render_trading_logic(res, prefix_key="dash"):
                     st.success("✅ Записано в Портфель!")
 
     st.divider()
-    html_table = "<style>.st-table { width: 100%; border-collapse: collapse; } .st-table th, .st-table td { padding: 10px; border-bottom: 1px solid #2e303e; } .st-table a { color: #66c0f4; text-decoration: none; font-weight: bold; }</style><table class='st-table'><tr><th>Деталь</th><th>Ціна продажу (Брутто)</th><th>Тобі (Чистими)</th><th>Продажі (тижд)</th><th>Дія</th></tr>"
+    html_table = "<style>.st-table { width: 100%; border-collapse: collapse; } .st-table th, .st-table td { padding: 10px; border-bottom: 1px solid #2e303e; } .st-table a { color: #66c0f4; text-decoration: none; font-weight: bold; }</style><table class='st-table'><tr><th>Деталь</th><th>Ціна (Брутто)</th><th>Тобі (Чистими)</th><th>Продажі (тижд)</th><th>Дія</th></tr>"
     for p in res['parts_data']: 
         html_table += f"<tr><td>{p['Деталь']}</td><td><b>{p['Ціна']} ₴</b></td><td style='color:#a3e635;'><b>{p['Чистими']} ₴</b></td><td>~{p['Продажі']}</td><td><a href='{p['Link']}'>Купити 🛒</a></td></tr>"
     st.markdown(html_table + "</table>", unsafe_allow_html=True)
@@ -308,9 +351,9 @@ def render_full_set_dashboard(res, prefix_key):
 # ==========================================
 with st.sidebar:
     st.title("🛠 Sedrik Dota Tool")
-    st.markdown("`v38.0 | Clean Market Math`")
+    st.markdown("`v40.0 | Classic Math Restored`")
     st.divider()
-    menu_choice = st.radio("НАВІГАЦІЯ:", ["🔍 Сканер Сетів", "📚 Бібліотека", "💼 Портфель", "📊 Звіти (База)"])
+    menu_choice = st.radio("НАВІГАЦІЯ:", ["🔍 Сканер Сетів", "🎲 Рандомна Вітрина", "📚 Бібліотека", "💼 Портфель", "📊 Звіти (База)"])
     st.divider()
 
 # ==========================================
@@ -345,6 +388,8 @@ if menu_choice == "🔍 Сканер Сетів":
                 for i, item in enumerate(items):
                     status_text.text(f"Сканування ({i+1}/{len(items)}): {item}")
                     data = get_steam_price_data(item)
+                    
+                    # ПОВЕРНУЛИ СТАРУ, ІДЕАЛЬНУ ФОРМУЛУ
                     clean_part = get_clean_income(data['price'])
                     
                     parts_data.append({
@@ -368,6 +413,93 @@ if menu_choice == "🔍 Сканер Сетів":
 
     if st.session_state.dota_result:
         render_full_set_dashboard(st.session_state.dota_result, prefix_key="single_scan")
+
+# ==========================================
+# СТОРІНКА 1.5: РАНДОМНА ВІТРИНА
+# ==========================================
+elif menu_choice == "🎲 Рандомна Вітрина":
+    st.header("🎲 Вітрина Сетів (Миттєва генерація)")
+    st.markdown("Програма бере сети напряму з бази Steam. Якщо ціна тобі подобається — тисни кнопку глибокого аналізу!")
+    
+    with st.spinner("Синхронізую базу ринку Steam..."):
+        MARKET_DB = fetch_steam_market_data()
+        
+    if not MARKET_DB:
+        st.error("Steam тимчасово недоступний. Спробуй пізніше.")
+    else:
+        col1, col2, col3 = st.columns([2, 1.5, 1])
+        with col1:
+            showcase_limit = st.slider("Скільки сетів на вітрину?", min_value=4, max_value=20, value=8, step=4)
+        with col2:
+            min_price_filter = st.number_input("Мінімальна ціна (₴):", min_value=1, value=50, step=10, help="Сети дешевші за цю суму не потраплять на вітрину")
+        with col3:
+            st.write("") 
+            auto_scan_btn = st.button("🚀 Оновити вітрину", type="primary", use_container_width=True)
+
+        if auto_scan_btn:
+            filtered_db = [s for s in MARKET_DB if s['price'] >= min_price_filter]
+            
+            if not filtered_db:
+                st.warning(f"У топ-500 зараз немає сетів дорожче {min_price_filter} ₴. Зменш ціну.")
+                st.session_state.preview_sets = []
+            else:
+                amount_to_pick = min(showcase_limit, len(filtered_db))
+                st.session_state.preview_sets = random.sample(filtered_db, amount_to_pick)
+            
+            st.session_state.deep_scan_result = None 
+
+        if st.session_state.preview_sets:
+            st.subheader("🛍️ Твої знахідки:")
+            
+            for i in range(0, len(st.session_state.preview_sets), 4):
+                cols = st.columns(4)
+                for j in range(4):
+                    if i + j < len(st.session_state.preview_sets):
+                        p_res = st.session_state.preview_sets[i + j]
+                        with cols[j]:
+                            with st.container(border=True):
+                                if p_res.get('image_url'):
+                                    st.image(p_res['image_url'], use_container_width=True)
+                                else:
+                                    st.info("📷 Нема фото")
+                                
+                                st.markdown(f"**{p_res.get('name', 'Невідомо')}**")
+                                st.markdown(f"💰 Ціна: **{p_res.get('price', 0)} ₴**")
+                                
+                                if st.button("🔬 Аналізувати", key=f"deep_{i+j}_{p_res.get('name', i)}", use_container_width=True):
+                                    with st.spinner(f"Сканую деталі для {p_res['name']}..."):
+                                        exact_name = search_correct_page_name(p_res['name'])
+                                        set_info = get_full_set_info(exact_name)
+                                        
+                                        parts_data = []
+                                        total_parts_price = 0
+                                        total_parts_clean_income = 0
+                                        
+                                        if set_info["components"]:
+                                            for item in set_info["components"]:
+                                                data = get_steam_price_data(item)
+                                                clean_part = get_clean_income(data['price'])
+                                                parts_data.append({"Деталь": item, "Ціна": data['price'], "Чистими": clean_part, "Продажі": data['volume'], "Link": get_steam_client_url(item)})
+                                                total_parts_price += data['price']
+                                                total_parts_clean_income += clean_part
+                                        else:
+                                            st.error("❌ Liquipedia не знає такого сету.")
+                                            
+                                        st.session_state.deep_scan_result = {
+                                            "exact_name": exact_name,
+                                            "set_info": set_info,
+                                            "steam_image": p_res.get('image_url'),
+                                            "bundle_data": {"price": p_res.get('price', 0), "volume": 0},
+                                            "parts_data": parts_data,
+                                            "total_parts_price": total_parts_price,
+                                            "total_parts_clean_income": total_parts_clean_income
+                                        }
+                                    st.rerun()
+
+        if st.session_state.deep_scan_result and st.session_state.deep_scan_result["parts_data"]:
+            st.divider()
+            st.subheader("🎯 Результати глибокого аналізу:")
+            render_full_set_dashboard(st.session_state.deep_scan_result, prefix_key="deep_scan_dash")
 
 # ==========================================
 # СТОРІНКА 2: БІБЛІОТЕКА СЕТІВ
