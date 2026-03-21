@@ -23,9 +23,9 @@ STEAM_APP_ID_DOTA = 570
 CURRENCY_UAH = 18
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Referer': 'https://liquipedia.net/'
+    'Referer': 'https://steamcommunity.com/'
 }
 session = requests.Session()
 session.headers.update(HEADERS)
@@ -52,8 +52,10 @@ if 'dota_result' not in st.session_state:
     st.session_state.dota_result = None
 if 'lib_result' not in st.session_state:
     st.session_state.lib_result = None
-if 'random_results' not in st.session_state:
-    st.session_state.random_results = []
+if 'preview_sets' not in st.session_state:
+    st.session_state.preview_sets = []
+if 'deep_scan_result' not in st.session_state:
+    st.session_state.deep_scan_result = None
 if 'scan_count' not in st.session_state:
     st.session_state.scan_count = 0
 
@@ -168,7 +170,7 @@ def get_steam_price_data(item_name: str) -> dict:
     url = f"https://steamcommunity.com/market/priceoverview/?appid={STEAM_APP_ID_DOTA}&currency={CURRENCY_UAH}&market_hash_name={urllib.parse.quote(item_name)}"
     result = {"price": 0, "volume": 0}
     try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
+        res = session.get(url, timeout=10) # Використовуємо сесію для імітації браузера
         if res.status_code == 200:
             data = res.json()
             if data.get("success"):
@@ -176,8 +178,10 @@ def get_steam_price_data(item_name: str) -> dict:
                     result["price"] = int(float(data["lowest_price"].replace("₴", "").replace(" ", "").replace(",", ".")))
                 if "volume" in data:
                     result["volume"] = int(data["volume"].replace(",", "")) * 7
-        time.sleep(1.5)
-    except: pass
+        # ЗБІЛЬШЕНИЙ ЧАС ОЧІКУВАННЯ, ЩОБ НЕ ЗЛОВИТИ БАН 429
+        time.sleep(2.5) 
+    except: 
+        time.sleep(3.0) # Якщо помилка - чекаємо ще довше
     return result
 
 # --- ФУНКЦІЇ МАЛЮВАННЯ ДАШБОРДІВ ---
@@ -186,10 +190,10 @@ def render_trading_logic(res, prefix_key="dash"):
     st.markdown("### 🧮 Розрахунок прибутку")
     
     if res['total_parts_price'] == 0 or res['bundle_data']['price'] == 0:
-        st.warning("⚠️ **Обережно:** Steam повернув нульові ціни. Це означає, що у тебе тимчасовий блок запитів (Rate Limit). Зачекай пару хвилин і натисни кнопку нижче.")
+        st.warning("⚠️ Steam повернув нульові ціни. Це означає, що у тебе тимчасовий блок запитів (Rate Limit). Зачекай пару хвилин і натисни кнопку нижче.")
         if st.button("🔄 Перегенерувати ціни (Зняти нулі)", type="primary", key=f"rescan_{safe_key}"):
             get_steam_price_data.clear()
-            with st.spinner("Перевіряю ціни наново..."):
+            with st.spinner("Обережно перевіряю ціни наново (з великими паузами)..."):
                 items = [p['Деталь'] for p in res['parts_data']]
                 res['bundle_data'] = get_steam_price_data(res['exact_name'])
                 res['parts_data'] = []
@@ -298,9 +302,9 @@ def render_full_set_dashboard(res, prefix_key, check_easter_egg=False):
 # ==========================================
 with st.sidebar:
     st.title("🛠 Sedrik Dota Tool")
-    st.markdown("`v27.0 | Bulldog Randomizer`")
+    st.markdown("`v28.0 | Sniper Scanner Edition`")
     st.divider()
-    menu_choice = st.radio("НАВІГАЦІЯ:", ["🔍 Сканер Сетів", "🎲 Рандомний Сканер", "📚 Бібліотека", "💼 Портфель", "📊 Звіти (База)"])
+    menu_choice = st.radio("НАВІГАЦІЯ:", ["🔍 Сканер Сетів", "🎲 Рандомна Вітрина", "📚 Бібліотека", "💼 Портфель", "📊 Звіти (База)"])
     st.divider()
 
 # ==========================================
@@ -356,23 +360,21 @@ if menu_choice == "🔍 Сканер Сетів":
         render_full_set_dashboard(st.session_state.dota_result, prefix_key="single_scan", check_easter_egg=True)
 
 # ==========================================
-# СТОРІНКА 1.5: РАНДОМНИЙ СКАНЕР (Вдосконалений)
+# СТОРІНКА 1.5: РАНДОМНА ВІТРИНА (БЕЗПЕЧНА)
 # ==========================================
-elif menu_choice == "🎲 Рандомний Сканер":
-    st.header("🎲 Рандомний Сканер (Справжній рандом)")
-    st.markdown("Програма стрибає на **випадкову сторінку Торгового майданчика Steam**, шукає серед лотів ТІЛЬКИ робочі сети і виводить їх тобі.")
+elif menu_choice == "🎲 Рандомна Вітрина":
+    st.header("🎲 Рандомна Вітрина (Безпечний пошук)")
+    st.markdown("Програма дістає випадкові сети і перевіряє **ТІЛЬКИ ціну бандлу**. Це береже твій IP від бану. Якщо ціна бандлу тобі подобається — тисни кнопку глибокого аналізу!")
     
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.info("💡 Якщо Steam заблокує прямий пошук, програма автоматично перемкнеться на внутрішню резервну базу. Твій скан більше ніколи не зупиниться!")
+        st.info("💡 Шукаємо одразу 5 сетів для вітрини.")
     with col2:
-        n_random = st.slider("Скільки сетів дістати?", min_value=1, max_value=5, value=2)
-        auto_scan_btn = st.button("🚀 Випробувати удачу", type="primary", use_container_width=True)
+        auto_scan_btn = st.button("🚀 Оновити вітрину", type="primary", use_container_width=True)
 
     if auto_scan_btn:
-        with st.spinner("Звертаюсь до Steam Market за випадковою сторінкою (дістаю 50 лотів)..."):
+        with st.spinner("Звертаюсь до бази Steam..."):
             random_start = random.randint(0, 300) * 10
-            # Дістаємо одразу 50 лотів, щоб точно знайти серед них робочі сети
             url = f"https://steamcommunity.com/market/search/render/?query=&start={random_start}&count=50&search_descriptions=0&sort_column=popular&sort_dir=desc&appid=570&category_570_Type%5B%5D=tag_bundle"
             
             raw_sets = []
@@ -390,70 +392,92 @@ elif menu_choice == "🎲 Рандомний Сканер":
                 
             raw_sets = list(set(raw_sets))
         
-        # Якщо Steam пустий, беремо резервну базу
         if not raw_sets:
             raw_sets = FALLBACK_SETS.copy()
-            st.toast("⚠️ Steam приховав сторінку пошуку. Використовую надійну резервну базу сетів!")
-        else:
-            st.toast(f"✅ Знайдено вибірку на {random_start}-й позиції маркету!")
+            st.toast("⚠️ Використовую резервну базу сетів.")
 
-        random.shuffle(raw_sets) # Перемішуємо вибірку
-        st.warning(f"⏳ Шукаю рівно {n_random} робочих сетів. Програма ігноруватиме сміття. Зачекай...")
+        random.shuffle(raw_sets)
         
-        results_list = []
+        preview_list = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
+        # Шукаємо рівно 4 сети для вітрини
         for raw_name in raw_sets:
-            # ЗУПИНЯЄМОСЯ, як тільки знайшли потрібну кількість
-            if len(results_list) >= n_random:
+            if len(preview_list) >= 4:
                 break
                 
-            status_text.text(f"🔍 Парсинг: перевіряю '{raw_name}'...")
+            status_text.text(f"🔍 Формую вітрину: перевіряю '{raw_name}'...")
             
             exact_name = search_correct_page_name(raw_name)
             set_info = get_full_set_info(exact_name)
-            items = set_info["components"]
             
-            # Якщо це реальний сет і в ньому є деталі — скануємо ціни!
-            if items:
-                status_text.text(f"💰 Знайдено робочий сет '{exact_name}'! Сканую ціни...")
+            if set_info["components"]:
+                # Беремо ТІЛЬКИ ціну бандлу (1 запит!)
                 bundle_data = get_steam_price_data(exact_name)
-                parts_data = []
-                total_parts_price = 0
-                total_parts_clean_income = 0
                 
-                for item in items:
-                    data = get_steam_price_data(item)
-                    clean_part = get_clean_income(data['price'])
-                    parts_data.append({"Деталь": item, "Ціна": data['price'], "Чистими": clean_part, "Продажі": data['volume'], "Link": get_steam_client_url(item)})
-                    total_parts_price += data['price']
-                    total_parts_clean_income += clean_part
-                    
-                results_list.append({
-                    "exact_name": exact_name, "set_info": set_info, "bundle_data": bundle_data,
-                    "parts_data": parts_data, "total_parts_price": total_parts_price,
-                    "total_parts_clean_income": total_parts_clean_income
+                preview_list.append({
+                    "exact_name": exact_name,
+                    "set_info": set_info,
+                    "bundle_price": bundle_data['price']
                 })
-                
-                progress_bar.progress(len(results_list) / n_random)
+                progress_bar.progress(len(preview_list) / 4)
         
         status_text.empty()
         progress_bar.empty()
         
-        if results_list:
-            st.session_state.random_results = results_list
-            st.success(f"🎉 Готово! Знайдено {len(results_list)} робочих сетів.")
-        else:
-            st.error("На жаль, у цій вибірці не виявилося жодного робочого сету. Натисни кнопку ще раз!")
+        st.session_state.preview_sets = preview_list
+        st.session_state.deep_scan_result = None # Скидаємо попередній глибокий скан
+        st.success("🎉 Вітрина оновлена!")
 
-    if st.session_state.random_results:
+    # МАЛЮЄМО ВІТРИНУ (4 картки в ряд)
+    if st.session_state.preview_sets:
+        st.subheader("🛍️ Твої знахідки:")
+        cols = st.columns(4)
+        
+        for i, p_res in enumerate(st.session_state.preview_sets):
+            with cols[i]:
+                with st.container(border=True):
+                    # Картинка
+                    if p_res['set_info']["image_url"]:
+                        st.image(p_res['set_info']["image_url"], use_container_width=True)
+                    else:
+                        st.info("📷 Нема фото")
+                    
+                    # Назва та ціна
+                    st.markdown(f"**{p_res['exact_name']}**")
+                    st.markdown(f"💰 Ціна бандлу: **{p_res['bundle_price']} ₴**")
+                    
+                    # Кнопка для глибокого сканування
+                    if st.button("🔬 Аналізувати", key=f"deep_{i}_{p_res['exact_name']}", use_container_width=True):
+                        with st.spinner(f"Сканую всі деталі для {p_res['exact_name']}... (З безпечними паузами)"):
+                            items = p_res['set_info']["components"]
+                            parts_data = []
+                            total_parts_price = 0
+                            total_parts_clean_income = 0
+                            
+                            for item in items:
+                                data = get_steam_price_data(item)
+                                clean_part = get_clean_income(data['price'])
+                                parts_data.append({"Деталь": item, "Ціна": data['price'], "Чистими": clean_part, "Продажі": data['volume'], "Link": get_steam_client_url(item)})
+                                total_parts_price += data['price']
+                                total_parts_clean_income += clean_part
+                                
+                            st.session_state.deep_scan_result = {
+                                "exact_name": p_res['exact_name'],
+                                "set_info": p_res['set_info'],
+                                "bundle_data": {"price": p_res['bundle_price'], "volume": 0},
+                                "parts_data": parts_data,
+                                "total_parts_price": total_parts_price,
+                                "total_parts_clean_income": total_parts_clean_income
+                            }
+                            st.rerun() # Перезавантажуємо сторінку, щоб показати результат нижче
+
+    # ЯКЩО НАТИСНУЛИ "АНАЛІЗУВАТИ" - МАЛЮЄМО ПОВНИЙ ДАШБОРД ПІД ВІТРИНОЮ
+    if st.session_state.deep_scan_result:
         st.divider()
-        st.subheader("👇 Твоя рандомна стрічка знахідок")
-        for idx, res in enumerate(st.session_state.random_results):
-            unique_prefix = f"rand_{idx}_{res['exact_name']}"
-            render_full_set_dashboard(res, prefix_key=unique_prefix, check_easter_egg=False)
-            st.write("---")
+        st.subheader("🎯 Результати глибокого аналізу:")
+        render_full_set_dashboard(st.session_state.deep_scan_result, prefix_key="deep_scan_dash", check_easter_egg=False)
 
 # ==========================================
 # СТОРІНКА 2: БІБЛІОТЕКА СЕТІВ
