@@ -8,6 +8,8 @@ from psycopg2.extras import RealDictCursor
 import pandas as pd
 from datetime import datetime
 import json
+import random
+import os
 
 # --- НАЛАШТУВАННЯ СТОРІНКИ ---
 st.set_page_config(
@@ -33,6 +35,10 @@ if 'dota_result' not in st.session_state:
     st.session_state.dota_result = None
 if 'lib_result' not in st.session_state:
     st.session_state.lib_result = None
+if 'random_results' not in st.session_state:
+    st.session_state.random_results = []
+if 'scan_count' not in st.session_state:
+    st.session_state.scan_count = 0
 
 # --- БАЗА ДАНИХ (NEON) ---
 def get_db_connection():
@@ -41,24 +47,9 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS trades (
-            id SERIAL PRIMARY KEY, date TEXT, set_name TEXT, 
-            strategy TEXT, cost INTEGER, profit INTEGER
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS portfolio (
-            id SERIAL PRIMARY KEY, date TEXT, item_name TEXT, 
-            buy_price INTEGER, target_price INTEGER
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS library (
-            id SERIAL PRIMARY KEY, set_name TEXT UNIQUE, hero TEXT, 
-            rarity TEXT, image_url TEXT, components TEXT
-        )
-    ''')
+    c.execute('''CREATE TABLE IF NOT EXISTS trades (id SERIAL PRIMARY KEY, date TEXT, set_name TEXT, strategy TEXT, cost INTEGER, profit INTEGER)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS portfolio (id SERIAL PRIMARY KEY, date TEXT, item_name TEXT, buy_price INTEGER, target_price INTEGER)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS library (id SERIAL PRIMARY KEY, set_name TEXT UNIQUE, hero TEXT, rarity TEXT, image_url TEXT, components TEXT)''')
     conn.commit()
     conn.close()
 
@@ -66,16 +57,14 @@ def save_to_reports(set_name, strategy, cost, profit):
     conn = get_db_connection()
     c = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    c.execute('INSERT INTO trades (date, set_name, strategy, cost, profit) VALUES (%s, %s, %s, %s, %s)',
-              (now, set_name, strategy, cost, profit))
+    c.execute('INSERT INTO trades (date, set_name, strategy, cost, profit) VALUES (%s, %s, %s, %s, %s)', (now, set_name, strategy, int(cost), int(profit)))
     conn.commit(); conn.close()
 
 def add_to_portfolio(item_name, buy_price, target_price):
     conn = get_db_connection()
     c = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d")
-    c.execute('INSERT INTO portfolio (date, item_name, buy_price, target_price) VALUES (%s, %s, %s, %s)',
-              (now, item_name, buy_price, target_price))
+    c.execute('INSERT INTO portfolio (date, item_name, buy_price, target_price) VALUES (%s, %s, %s, %s)', (now, item_name, int(buy_price), int(target_price)))
     conn.commit(); conn.close()
 
 def add_to_library(set_name, hero, rarity, image_url, components):
@@ -83,15 +72,12 @@ def add_to_library(set_name, hero, rarity, image_url, components):
     c = conn.cursor()
     c.execute("SELECT id FROM library WHERE set_name = %s", (set_name,))
     if not c.fetchone():
-        c.execute('''
-            INSERT INTO library (set_name, hero, rarity, image_url, components) 
-            VALUES (%s, %s, %s, %s, %s)
-        ''', (set_name, hero, rarity, image_url, json.dumps(components)))
+        c.execute('INSERT INTO library (set_name, hero, rarity, image_url, components) VALUES (%s, %s, %s, %s, %s)', (set_name, hero, rarity, image_url, json.dumps(components)))
     conn.commit(); conn.close()
 
 init_db()
 
-# --- ДОПОМІЖНІ ФУНКЦІЇ ---
+# --- ДОПОМІЖНІ ФУНКЦІЇ (СТАРА СИСТЕМА ЦІН) ---
 def get_clean_income(market_price: float) -> int:
     market_price = int(market_price)
     if market_price <= 0: return 0
@@ -105,7 +91,25 @@ def get_clean_income(market_price: float) -> int:
 def get_steam_client_url(item_name: str) -> str:
     return f"steam://openurl/https://steamcommunity.com/market/listings/{STEAM_APP_ID_DOTA}/{urllib.parse.quote(item_name)}"
 
-# --- КЕШОВАНІ ЗАПИТИ ---
+# --- РАДАР: ВИТЯГУВАННЯ БАЗИ ЗІ STEAM ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_all_steam_bundles_names():
+    sets_list = []
+    for page in range(5):
+        url = f"https://steamcommunity.com/market/search/render/?query=&start={page*100}&count=100&search_descriptions=0&sort_column=popular&sort_dir=desc&appid=570&category_570_Type%5B%5D=tag_bundle"
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=10).json()
+            soup = BeautifulSoup(res.get("results_html", ""), "html.parser")
+            rows = soup.find_all("span", class_="market_listing_item_name")
+            for row in rows:
+                raw_name = row.get_text(strip=True)
+                clean_name = raw_name.replace(" Bundle", "").replace(" Set", "")
+                sets_list.append(clean_name)
+        except: pass
+        time.sleep(1)
+    return list(set(sets_list))
+
+# --- КЕШОВАНІ ЗАПИТИ ДЛЯ СКАНЕРА ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def search_correct_page_name(query: str) -> str:
     url = "https://liquipedia.net/dota2/api.php"
@@ -168,13 +172,17 @@ def get_steam_price_data(item_name: str) -> dict:
                     result["price"] = int(float(data["lowest_price"].replace("₴", "").replace(" ", "").replace(",", ".")))
                 if "volume" in data:
                     result["volume"] = int(data["volume"].replace(",", "")) * 7
-        time.sleep(1.3)
+        time.sleep(1.5)
     except: pass
     return result
 
-# --- ФУНКЦІЯ МАЛЮВАННЯ ТОРГОВОГО ДАШБОРДУ ---
+# --- ФУНКЦІЇ МАЛЮВАННЯ ДАШБОРДІВ ---
 def render_trading_logic(res, prefix_key="dash"):
     st.markdown("### 🧮 Розрахунок прибутку")
+    
+    if res['total_parts_price'] == 0:
+        st.warning("⚠️ **ОБЕРЕЖНО:** Steam повернув нульові ціни. Можливо, деталі не продаються на Маркеті, або ти отримав тимчасовий блок запитів (зачекай 5 хвилин).")
+        
     tab1, tab2 = st.tabs(["🎁 СТРАТЕГІЯ 1: ПАКУВАННЯ", "✂️ СТРАТЕГІЯ 2: РОЗПАКУВАННЯ"])
     safe_key = f"{prefix_key}_{res['exact_name']}"
     
@@ -197,13 +205,11 @@ def render_trading_logic(res, prefix_key="dash"):
                 if user_buy_price > 0:
                     save_to_reports(res['exact_name'], "Пакування", int(user_buy_price), int(actual_pack_profit))
                     st.success("✅ Записано в Звіти!")
-                else: st.warning("Введи ціну закупки!")
         with btn_col2:
-            if st.button("💼 Додати у ПОРТФЕЛЬ (Ще лежить)", use_container_width=True, key=f"port_pack_{safe_key}"):
+            if st.button("💼 Додати у ПОРТФЕЛЬ", use_container_width=True, key=f"port_pack_{safe_key}"):
                 if user_buy_price > 0:
                     add_to_portfolio(res['exact_name'] + " (Збірка)", int(user_buy_price), int(user_sell_price))
                     st.success("✅ Записано в Портфель!")
-                else: st.warning("Введи ціну закупки!")
 
     with tab2:
         col_in1, col_in2 = st.columns(2)
@@ -224,32 +230,63 @@ def render_trading_logic(res, prefix_key="dash"):
                 if user_bundle_buy > 0:
                     save_to_reports(res['exact_name'], "Розпакування", int(user_bundle_buy), int(actual_unpack_profit))
                     st.success("✅ Записано в Звіти!")
-                else: st.warning("Введи ціну закупки!")
         with btn_col2:
-            if st.button("💼 Додати у ПОРТФЕЛЬ (Ще лежить)", use_container_width=True, key=f"port_unpack_{safe_key}"):
+            if st.button("💼 Додати у ПОРТФЕЛЬ", use_container_width=True, key=f"port_unpack_{safe_key}"):
                 if user_bundle_buy > 0:
                     add_to_portfolio(res['exact_name'] + " (Розпаковка)", int(user_bundle_buy), int(user_parts_sell))
                     st.success("✅ Записано в Портфель!")
-                else: st.warning("Введи ціну закупки!")
 
     st.divider()
     html_table = "<style>.st-table { width: 100%; border-collapse: collapse; } .st-table th, .st-table td { padding: 10px; border-bottom: 1px solid #2e303e; } .st-table a { color: #66c0f4; text-decoration: none; font-weight: bold; }</style><table class='st-table'><tr><th>Деталь</th><th>Ціна (₴)</th><th>Тобі (₴)</th><th>Продажі (тижд)</th><th>Дія</th></tr>"
     for p in res['parts_data']: html_table += f"<tr><td>{p['Деталь']}</td><td>{p['Ціна']}</td><td style='color:#a3e635;'>{p['Чистими']}</td><td>~{p['Продажі']}</td><td><a href='{p['Link']}'>Купити 🛒</a></td></tr>"
     st.markdown(html_table + "</table>", unsafe_allow_html=True)
 
+def render_full_set_dashboard(res, prefix_key, check_easter_egg=False):
+    """Малює весь блок з картинкою, кнопками і викликає таблицю."""
+    with st.container(border=True):
+        col_img, col_info = st.columns([1, 3])
+        with col_img:
+            if check_easter_egg and st.session_state.scan_count > 0 and st.session_state.scan_count % 5 == 0:
+                if os.path.exists("easter_egg.jpg"):
+                    st.image("easter_egg.jpg", use_container_width=True)
+                    st.caption("✨ Опа, пасхалочка! Гарного дня!")
+                else: st.info("📷 Пасхалка не знайдена")
+            elif res['set_info']["image_url"]:
+                try:
+                    img_res = requests.get(res['set_info']["image_url"], headers=HEADERS, timeout=5)
+                    if img_res.status_code == 200: st.image(img_res.content, use_container_width=True)
+                    else: st.info("📷 Помилка фото")
+                except: st.info("📷 Помилка фото")
+            else: st.info("📷 Фото не знайдено")
+                
+        with col_info:
+            st.subheader(f"📦 {res['exact_name']}")
+            st.markdown(f"**Герой:** `{res['set_info']['hero']}` &nbsp;|&nbsp; **Рідкість:** `{res['set_info']['rarity']}`")
+            
+            col_link, col_lib = st.columns(2)
+            with col_link:
+                st.markdown(f"<a href='{get_steam_client_url(res['exact_name'])}' style='display: inline-block; padding: 6px 15px; background-color: #1a2838; color: #66c0f4; text-decoration: none; border-radius: 4px; border: 1px solid #101822; width: 100%; text-align: center; font-weight: bold;'>Відкрити бандл у Steam 🔗</a>", unsafe_allow_html=True)
+            with col_lib:
+                components_to_save = [{"name": p['Деталь'], "last_price": p['Ціна']} for p in res['parts_data']]
+                if st.button("📚 Зберегти в Бібліотеку", key=f"btn_lib_{prefix_key}", use_container_width=True):
+                    add_to_library(res['exact_name'], res['set_info']['hero'], res['set_info']['rarity'], res['set_info']['image_url'], components_to_save)
+                    st.success("✅ Збережено назавжди!")
+
+    st.write("")
+    render_trading_logic(res, prefix_key=prefix_key)
 
 # ==========================================
 # БОКОВЕ МЕНЮ
 # ==========================================
 with st.sidebar:
     st.title("🛠 Sedrik Dota Tool")
-    st.markdown("`v13.0 | Premium Design Edition`")
+    st.markdown("`v20.0 | Classic Price System`")
     st.divider()
-    menu_choice = st.radio("НАВІГАЦІЯ:", ["🔍 Сканер Сетів", "📚 Бібліотека", "💼 Портфель", "📊 Звіти (База)"])
+    menu_choice = st.radio("НАВІГАЦІЯ:", ["🔍 Сканер Сетів", "🎲 Рандомний Сканер", "📚 Бібліотека", "💼 Портфель", "📊 Звіти (База)"])
     st.divider()
 
 # ==========================================
-# СТОРІНКА 1: СКАНЕР СЕТІВ
+# СТОРІНКА 1: СКАНЕР СЕТІВ (РУЧНИЙ)
 # ==========================================
 if menu_choice == "🔍 Сканер Сетів":
     st.header("🔍 Арбітражний сканер сетів Dota 2")
@@ -271,6 +308,7 @@ if menu_choice == "🔍 Сканер Сетів":
         if not items:
             st.error(f"Не вдалося знайти деталі для '{exact_name}'. Перевір правильність назви.")
         else:
+            st.session_state.scan_count += 1
             with st.sidebar:
                 bundle_data = get_steam_price_data(exact_name)
                 parts_data = []
@@ -282,10 +320,7 @@ if menu_choice == "🔍 Сканер Сетів":
                     data = get_steam_price_data(item)
                     clean_part = get_clean_income(data['price'])
                     
-                    parts_data.append({
-                        "Деталь": item, "Ціна": data['price'], "Чистими": clean_part,
-                        "Продажі": data['volume'], "Link": get_steam_client_url(item)
-                    })
+                    parts_data.append({"Деталь": item, "Ціна": data['price'], "Чистими": clean_part, "Продажі": data['volume'], "Link": get_steam_client_url(item)})
                     total_parts_price += data['price']
                     total_parts_clean_income += clean_part
                     progress_bar.progress((i + 1) / len(items))
@@ -300,42 +335,82 @@ if menu_choice == "🔍 Сканер Сетів":
                 status_text.empty(); progress_bar.empty()
 
     if st.session_state.dota_result:
-        res = st.session_state.dota_result
-        
-        with st.container(border=True):
-            col_img, col_info = st.columns([1, 3])
-            with col_img:
-                if res['set_info']["image_url"]:
-                    try:
-                        img_res = requests.get(res['set_info']["image_url"], headers=HEADERS, timeout=5)
-                        if img_res.status_code == 200: st.image(img_res.content, use_container_width=True)
-                        else: st.info("📷 Помилка фото")
-                    except: st.info("📷 Помилка фото")
-                else: st.info("📷 Фото не знайдено")
-                    
-            with col_info:
-                st.subheader(f"📦 {res['exact_name']}")
-                st.markdown(f"**Герой:** `{res['set_info']['hero']}` &nbsp;|&nbsp; **Рідкість:** `{res['set_info']['rarity']}`")
-                
-                col_link, col_lib = st.columns(2)
-                with col_link:
-                    st.markdown(f"<a href='{get_steam_client_url(res['exact_name'])}' style='display: inline-block; padding: 6px 15px; background-color: #1a2838; color: #66c0f4; text-decoration: none; border-radius: 4px; border: 1px solid #101822; width: 100%; text-align: center; font-weight: bold;'>Відкрити бандл у Steam 🔗</a>", unsafe_allow_html=True)
-                with col_lib:
-                    # При збереженні записуємо і назви, і свіжі ціни
-                    components_to_save = [{"name": p['Деталь'], "last_price": p['Ціна']} for p in res['parts_data']]
-                    if st.button("📚 Зберегти в Бібліотеку", key="btn_lib_scan", use_container_width=True):
-                        add_to_library(res['exact_name'], res['set_info']['hero'], res['set_info']['rarity'], res['set_info']['image_url'], components_to_save)
-                        st.success("✅ Збережено назавжди!")
-
-        st.write("") # Відступ
-        render_trading_logic(res, prefix_key="scan")
+        render_full_set_dashboard(st.session_state.dota_result, prefix_key="single_scan", check_easter_egg=True)
 
 # ==========================================
-# СТОРІНКА 2: БІБЛІОТЕКА СЕТІВ (v13 ДИЗАЙН)
+# СТОРІНКА 1.5: РАНДОМНИЙ СКАНЕР (АВТО-СТРІЧКА)
+# ==========================================
+elif menu_choice == "🎲 Рандомний Сканер(Пока дуууууже кривий але хочаб шось)":
+    st.header("🎲 Рандомний Сканер (Стрічка)")
+    st.markdown("Програма витягує випадкові сети зі Steam Market і повністю аналізує їх для тебе.")
+    
+    with st.spinner("🔄 Оновлюю базу популярних сетів зі Steam..."):
+        ALL_STEAM_SETS = fetch_all_steam_bundles_names()
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        if ALL_STEAM_SETS: st.info(f"Доступно **{len(ALL_STEAM_SETS)}** різних сетів.")
+        else: st.error("Steam тимчасово блокує масові запити. Спробуй через 10 хвилин.")
+    with col2:
+        n_random = st.slider("Скільки сетів дістати?", min_value=1, max_value=5, value=2)
+        auto_scan_btn = st.button("🚀 Дістати сети", type="primary", use_container_width=True)
+
+    if auto_scan_btn and ALL_STEAM_SETS:
+        sets_to_scan = random.sample(ALL_STEAM_SETS, min(n_random, len(ALL_STEAM_SETS)))
+        st.warning(f"⏳ Сканую {len(sets_to_scan)} сетів. Зачекай приблизно {len(sets_to_scan) * 10} сек...")
+        
+        results_list = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, raw_name in enumerate(sets_to_scan):
+            status_text.text(f"🔍 Парсинг ({i+1}/{len(sets_to_scan)}): {raw_name}")
+            
+            exact_name = search_correct_page_name(raw_name)
+            set_info = get_full_set_info(exact_name)
+            items = set_info["components"]
+            
+            if items:
+                bundle_data = get_steam_price_data(exact_name)
+                parts_data = []
+                total_parts_price = 0
+                total_parts_clean_income = 0
+                
+                for item in items:
+                    data = get_steam_price_data(item)
+                    clean_part = get_clean_income(data['price'])
+                    parts_data.append({"Деталь": item, "Ціна": data['price'], "Чистими": clean_part, "Продажі": data['volume'], "Link": get_steam_client_url(item)})
+                    total_parts_price += data['price']
+                    total_parts_clean_income += clean_part
+                    
+                results_list.append({
+                    "exact_name": exact_name, "set_info": set_info, "bundle_data": bundle_data,
+                    "parts_data": parts_data, "total_parts_price": total_parts_price,
+                    "total_parts_clean_income": total_parts_clean_income
+                })
+            
+            progress_bar.progress((i + 1) / len(sets_to_scan))
+        
+        status_text.empty()
+        progress_bar.empty()
+        
+        st.session_state.random_results = results_list
+        st.success(f"🎉 Готово! Проскановано {len(results_list)} сетів.")
+
+    if st.session_state.random_results:
+        st.divider()
+        st.subheader("👇 Твоя стрічка знахідок")
+        for idx, res in enumerate(st.session_state.random_results):
+            unique_prefix = f"auto_{idx}_{res['exact_name']}"
+            render_full_set_dashboard(res, prefix_key=unique_prefix, check_easter_egg=False)
+            st.write("---")
+
+# ==========================================
+# СТОРІНКА 2: БІБЛІОТЕКА СЕТІВ
 # ==========================================
 elif menu_choice == "📚 Бібліотека":
-    st.header("📚 Бібліотека Сетів")
-    st.markdown("Твоя особиста база для швидкого трейдингу. Вибирай сет зі списку нижче.")
+    st.markdown("<h1 style='text-align: center; color: #E0E0E0;'>📚 Бібліотека Сетів</h1>", unsafe_allow_html=True)
+    st.divider()
     
     conn = get_db_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -344,24 +419,32 @@ elif menu_choice == "📚 Бібліотека":
     conn.close()
     
     if not lib_sets:
-        st.info("💡 Твоя Бібліотека поки що порожня. Зайди у 'Сканер Сетів' і збережи цікаві сети сюди.")
+        st.info("💡 Твоя Бібліотека поки що порожня. Зайди у 'Сканер Сетів' і збережи сет.")
     else:
         set_names = [s['set_name'] for s in lib_sets]
-        selected_set_name = st.selectbox("📌 Вибери сет з колекції:", set_names)
         
+        col_sel, col_del = st.columns([4, 1])
+        with col_sel:
+            selected_set_name = st.selectbox("📌 Обери сет для перегляду:", set_names, label_visibility="collapsed")
+        with col_del:
+            if st.button("🗑 Видалити сет", use_container_width=True):
+                selected_set_to_del = next(s for s in lib_sets if s['set_name'] == selected_set_name)
+                conn = get_db_connection()
+                conn.cursor().execute("DELETE FROM library WHERE id = %s", (selected_set_to_del['id'],))
+                conn.commit(); conn.close()
+                if st.session_state.lib_result and st.session_state.lib_result['exact_name'] == selected_set_name:
+                    st.session_state.lib_result = None
+                st.rerun()
+
         selected_set = next(s for s in lib_sets if s['set_name'] == selected_set_name)
         components_raw = json.loads(selected_set['components'])
         components_names = [comp['name'] if isinstance(comp, dict) else comp for comp in components_raw]
-        
-        # Рахуємо приблизну стару вартість (якщо ціни зберігались)
         old_total_value = sum([comp.get('last_price', 0) for comp in components_raw if isinstance(comp, dict)])
         
-        st.write("") # Відступ
+        st.write("")
         
-        # КАРТКА СЕТУ (Новий крутий дизайн)
         with st.container(border=True):
             col_img, col_details = st.columns([1, 2.5])
-            
             with col_img:
                 if selected_set['image_url']:
                     try:
@@ -369,54 +452,30 @@ elif menu_choice == "📚 Бібліотека":
                         if img_res.status_code == 200: st.image(img_res.content, use_container_width=True)
                         else: st.info("📷 Помилка фото")
                     except: st.info("📷 Помилка фото")
-            
             with col_details:
-                # Назва і кнопка видалення в один рядок
-                head_col1, head_col2 = st.columns([4, 1])
-                with head_col1:
-                    st.subheader(selected_set['set_name'])
-                with head_col2:
-                    if st.button("🗑 Видалити", key=f"del_{selected_set['id']}", use_container_width=True):
-                        conn = get_db_connection()
-                        conn.cursor().execute("DELETE FROM library WHERE id = %s", (selected_set['id'],))
-                        conn.commit(); conn.close()
-                        if st.session_state.lib_result and st.session_state.lib_result['exact_name'] == selected_set_name:
-                            st.session_state.lib_result = None
-                        st.rerun()
-
+                st.subheader(selected_set['set_name'])
                 st.markdown(f"**Герой:** `{selected_set['hero']}` &nbsp;|&nbsp; **Рідкість:** `{selected_set['rarity']}`")
                 if old_total_value > 0:
                     st.markdown(f"💸 **Остання відома сумарна вартість деталей:** `{old_total_value} ₴`")
                 
                 with st.expander(f"📦 Склад сету ({len(components_names)} шт.) - Старі ціни"):
-                    # Робимо красиву міні-табличку для старих цін
                     old_table = "<table style='width:100%; border-collapse: collapse;'><tr><th style='border-bottom: 1px solid #444; padding: 4px; text-align: left;'>Деталь</th><th style='border-bottom: 1px solid #444; padding: 4px; text-align: right;'>Остання ціна</th></tr>"
                     for comp in components_raw:
-                        if isinstance(comp, str):
-                            old_table += f"<tr><td style='padding: 4px;'>{comp}</td><td style='padding: 4px; text-align: right; color: #888;'>Невідомо</td></tr>"
-                        else:
-                            old_table += f"<tr><td style='padding: 4px;'>{comp['name']}</td><td style='padding: 4px; text-align: right; color: #ccc;'>{comp.get('last_price', 0)} ₴</td></tr>"
+                        if isinstance(comp, str): old_table += f"<tr><td style='padding: 4px;'>{comp}</td><td style='padding: 4px; text-align: right; color: #888;'>Невідомо</td></tr>"
+                        else: old_table += f"<tr><td style='padding: 4px;'>{comp['name']}</td><td style='padding: 4px; text-align: right; color: #ccc;'>{comp.get('last_price', 0)} ₴</td></tr>"
                     old_table += "</table>"
                     st.markdown(old_table, unsafe_allow_html=True)
 
         st.write("")
-        
-        # БЛОК ОНОВЛЕННЯ (Центральний акцент)
         has_cached_data = (st.session_state.lib_result and st.session_state.lib_result['exact_name'] == selected_set_name)
-        
-        # Велика кнопка оновлення
         update_btn = st.button("🔄 Отримати свіжі ціни маркету", type="primary", use_container_width=True)
         
         if has_cached_data:
             last_upd = st.session_state.lib_result.get('last_updated', datetime.now())
             mins_passed = int((datetime.now() - last_upd).total_seconds() / 60)
-            if mins_passed >= 30:
-                st.warning(f"⚠️ Дані сканувались {mins_passed} хв тому. Рекомендую оновити.")
-            else:
-                time_str = "Щойно" if mins_passed == 0 else f"{mins_passed} хв тому"
-                st.caption(f"✅ Ціни актуальні (Оновлено: {time_str})")
+            if mins_passed >= 30: st.warning(f"⚠️ Дані сканувались {mins_passed} хв тому. Рекомендую оновити.")
+            else: st.caption(f"✅ Ціни актуальні (Оновлено: {'Щойно' if mins_passed == 0 else f'{mins_passed} хв тому'})")
 
-        # Логіка парсингу при натисканні
         if update_btn:
             with st.spinner("Зв'язуюсь зі Steam... Це займе кілька секунд."):
                 bundle_data = get_steam_price_data(selected_set_name)
@@ -430,140 +489,98 @@ elif menu_choice == "📚 Бібліотека":
                     data = get_steam_price_data(item_name)
                     clean_part = get_clean_income(data['price'])
                     
-                    parts_data.append({
-                        "Деталь": item_name, "Ціна": data['price'], "Чистими": clean_part,
-                        "Продажі": data['volume'], "Link": get_steam_client_url(item_name)
-                    })
+                    parts_data.append({"Деталь": item_name, "Ціна": data['price'], "Чистими": clean_part, "Продажі": data['volume'], "Link": get_steam_client_url(item_name)})
                     total_parts_price += data['price']
                     total_parts_clean_income += clean_part
-                    
                     updated_components_for_db.append({"name": item_name, "last_price": data['price']})
                     my_bar.progress((i + 1) / len(components_names))
                 my_bar.empty()
                 
-                # Перезаписуємо склад сету в базу з НОВИМИ цінами
                 conn = get_db_connection()
                 c = conn.cursor()
                 c.execute("UPDATE library SET components = %s WHERE id = %s", (json.dumps(updated_components_for_db), selected_set['id']))
                 conn.commit(); conn.close()
                 
                 st.session_state.lib_result = {
-                    "exact_name": selected_set_name, 
-                    "bundle_data": bundle_data,
-                    "parts_data": parts_data, 
-                    "total_parts_price": total_parts_price,
-                    "total_parts_clean_income": total_parts_clean_income,
+                    "exact_name": selected_set_name, "bundle_data": bundle_data, "parts_data": parts_data, 
+                    "total_parts_price": total_parts_price, "total_parts_clean_income": total_parts_clean_income,
                     "last_updated": datetime.now()
                 }
                 st.rerun()
 
-        # Якщо є свіжі дані — виводимо торговий термінал
         if has_cached_data:
             render_trading_logic(st.session_state.lib_result, prefix_key="lib_dash")
 
 # ==========================================
-# СТОРІНКА 3: ПОРТФЕЛЬ
+# СТОРІНКА 3: ПОРТФЕЛЬ & СТОРІНКА 4: ЗВІТИ
 # ==========================================
 elif menu_choice == "💼 Портфель":
     st.header("💼 Твої активні інвестиції")
-    
     conn = get_db_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("SELECT * FROM portfolio ORDER BY id DESC")
     df_p = pd.DataFrame(c.fetchall())
     conn.close()
     
-    if df_p.empty:
-        st.info("Твій портфель поки що порожній.")
+    if df_p.empty: st.info("Твій портфель поки що порожній.")
     else:
-        df_p_display = df_p.rename(columns={
-            "id": "ID", "date": "Дата покупки", "item_name": "Назва Лоту", 
-            "buy_price": "Ціна покупки (₴)", "target_price": "Ціль продажу (₴)"
-        })
+        df_p_display = df_p.rename(columns={"id": "ID", "date": "Дата покупки", "item_name": "Назва Лоту", "buy_price": "Ціна покупки (₴)", "target_price": "Ціль продажу (₴)"})
         st.dataframe(df_p_display, hide_index=True, use_container_width=True)
-        
         st.divider()
         st.subheader("🛠 Управління лотами")
-        
         lot_ids = df_p['id'].tolist()
         selected_id = st.selectbox("Обери ID лоту для управління:", lot_ids)
-        
         if selected_id:
             current_row = df_p[df_p['id'] == selected_id].iloc[0]
             item_name = current_row['item_name']
-            
-            st.markdown(f"**Редагування лоту:** `{item_name}`")
-            
             col1, col2 = st.columns(2)
             new_buy = col1.number_input("Ціна покупки (₴):", value=float(current_row['buy_price']), step=1.0, key="edit_buy")
             new_target = col2.number_input("Фактична ціна продажу (брутто ₴):", value=float(current_row['target_price']), step=1.0, key="edit_sell")
-            
             if st.button("💾 Оновити ціни в Портфелі"):
                 conn = get_db_connection()
                 c = conn.cursor()
-                c.execute("UPDATE portfolio SET buy_price = %s, target_price = %s WHERE id = %s",
-                          (int(new_buy), int(new_target), int(selected_id)))
+                c.execute("UPDATE portfolio SET buy_price = %s, target_price = %s WHERE id = %s", (int(new_buy), int(new_target), int(selected_id)))
                 conn.commit(); conn.close()
-                st.success("Ціни успішно оновлено!")
-                time.sleep(1); st.rerun()
-                
+                st.success("Ціни успішно оновлено!"); time.sleep(1); st.rerun()
             st.markdown("---")
             btn_col1, btn_col2 = st.columns(2)
-            
             with btn_col1:
                 if st.button("📊 ПРОДАНО! Відправити у Звіт", type="primary", use_container_width=True):
                     clean_income = get_clean_income(new_target)
                     final_profit = clean_income - new_buy
                     save_to_reports(item_name, "Продаж з портфеля", int(new_buy), int(final_profit))
-                    
                     conn = get_db_connection()
                     c = conn.cursor()
                     c.execute("DELETE FROM portfolio WHERE id = %s", (int(selected_id),))
                     conn.commit(); conn.close()
-                    
-                    st.success(f"✅ Успішно продано! Твій чистий прибуток: {final_profit} ₴")
-                    time.sleep(1.5); st.rerun()
-                    
+                    st.success(f"✅ Успішно продано! Твій чистий прибуток: {final_profit} ₴"); time.sleep(1.5); st.rerun()
             with btn_col2:
                 if st.button("❌ Просто видалити (Відміна)", use_container_width=True):
                     conn = get_db_connection()
                     c = conn.cursor()
                     c.execute("DELETE FROM portfolio WHERE id = %s", (int(selected_id),))
                     conn.commit(); conn.close()
-                    st.warning("Лот видалено з портфеля.")
-                    time.sleep(1); st.rerun()
+                    st.warning("Лот видалено з портфеля."); time.sleep(1); st.rerun()
 
-# ==========================================
-# СТОРІНКА 4: ЗВІТИ
-# ==========================================
 elif menu_choice == "📊 Звіти (База)":
     st.header("📊 Хмарна фінансова звітність")
-    
     conn = get_db_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("SELECT * FROM trades ORDER BY id DESC")
     df = pd.DataFrame(c.fetchall())
     conn.close()
-    
-    if df.empty:
-        st.info("База поки що порожня. Зафіксуй перший профіт!")
+    if df.empty: st.info("База поки що порожня. Зафіксуй перший профіт!")
     else:
         total_profit = df['profit'].sum()
         total_invested = df['cost'].sum()
         roi = (total_profit / total_invested * 100) if total_invested > 0 else 0
-        
         col1, col2, col3 = st.columns(3)
         col1.metric("💰 Загальний профіт", f"{total_profit} ₴")
         col2.metric("💸 Вкладено коштів", f"{total_invested} ₴")
         col3.metric("📈 Загальний ROI", f"{roi:.1f}%")
-        
         st.divider()
-        df_display = df.rename(columns={
-            "id": "ID", "date": "Дата", "set_name": "Назва", 
-            "strategy": "Стратегія", "cost": "Витрати (₴)", "profit": "Профіт (₴)"
-        })
+        df_display = df.rename(columns={"id": "ID", "date": "Дата", "set_name": "Назва", "strategy": "Стратегія", "cost": "Витрати (₴)", "profit": "Профіт (₴)"})
         st.dataframe(df_display, hide_index=True, use_container_width=True)
-        
         st.divider()
         with st.expander("⚙️ Налаштування бази"):
             del_trade_id = st.number_input("Видалити звіт (введи ID):", step=1, min_value=0)
