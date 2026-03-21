@@ -204,15 +204,11 @@ def render_trading_logic(res, prefix_key="dash"):
                 for item in items:
                     d = get_steam_price_data(item)
                     c = get_clean_income(d['price'])
-                    i_gross = int(d['price'] * 0.85)
-                    i_clean = get_clean_income(i_gross)
                     res['parts_data'].append({
                         "Деталь": item, "Ціна": d['price'], "Чистими": c, 
-                        "Авто_Брутто": i_gross, "Авто_Чистими": i_clean, 
                         "Продажі": d['volume'], "Link": get_steam_client_url(item)
                     })
-                    t_p += d['price']
-                    t_c += c
+                    t_p += d['price']; t_c += c
                 res['total_parts_price'] = t_p
                 res['total_parts_clean_income'] = t_c
             st.rerun()
@@ -222,22 +218,15 @@ def render_trading_logic(res, prefix_key="dash"):
     with tab1:
         col_in1, col_in2 = st.columns(2)
         user_buy_price = col_in1.number_input("За скільки КУПИВ всі частини (сума ₴):", value=int(res['total_parts_price']), step=1, key=f"buy_pack_{safe_key}")
-        user_sell_price = col_in2.number_input("За скільки ПРОДАШ цілий бандл (брутто ₴):", value=int(res['bundle_data']['price']), step=1, key=f"sell_pack_{safe_key}")
+        user_sell_price = col_in2.number_input("Ціна продажу цілого бандлу (брутто ₴):", value=int(res['bundle_data']['price']), step=1, key=f"sell_pack_{safe_key}")
         
         actual_bundle_income = get_clean_income(user_sell_price)
         actual_pack_profit = actual_bundle_income - user_buy_price
         
-        # Математика автопокупки (Fast Sell)
-        instant_bundle_gross = int(user_sell_price * 0.85)
-        instant_bundle_clean = get_clean_income(instant_bundle_gross)
-        instant_bundle_profit = instant_bundle_clean - user_buy_price
-        
         st.info(f"Твій чистий дохід після комісії Steam: **{actual_bundle_income} ₴**")
         
-        if actual_pack_profit > 0: 
-            st.metric(f"Чистий Профіт (Автопокупка: ~{instant_bundle_profit} ₴)", f"{actual_pack_profit} ₴", delta="Вигідно")
-        else: 
-            st.metric(f"Чистий Профіт (Автопокупка: ~{instant_bundle_profit} ₴)", f"{actual_pack_profit} ₴", delta="Збиток", delta_color="inverse")
+        if actual_pack_profit > 0: st.metric("Чистий Профіт", f"{actual_pack_profit} ₴", delta="Вигідно")
+        else: st.metric("Чистий Профіт", f"{actual_pack_profit} ₴", delta="Збиток", delta_color="inverse")
 
         btn_col1, btn_col2 = st.columns(2)
         with btn_col1:
@@ -254,23 +243,14 @@ def render_trading_logic(res, prefix_key="dash"):
     with tab2:
         col_in1, col_in2 = st.columns(2)
         user_bundle_buy = col_in1.number_input("За скільки КУПИВ цілий бандл (₴):", value=int(res['bundle_data']['price']), step=1, key=f"buy_unpack_{safe_key}")
-        # ПОВЕРНУЛИ БРУТТО!
-        user_parts_sell = col_in2.number_input("За скільки ПРОДАШ всі деталі (сума брутто ₴):", value=int(res['total_parts_price']), step=1, key=f"sell_unpack_{safe_key}")
+        actual_parts_income = col_in2.number_input("Сума ЧИСТИХ доходів з деталей (₴):", value=int(res['total_parts_clean_income']), step=1, key=f"sell_unpack_norm_{safe_key}")
         
-        actual_parts_income = get_clean_income(user_parts_sell)
         actual_unpack_profit = actual_parts_income - user_bundle_buy
         
-        # Математика автопокупки (Fast Sell)
-        instant_parts_gross = int(user_parts_sell * 0.85)
-        instant_parts_clean = get_clean_income(instant_parts_gross)
-        instant_unpack_profit = instant_parts_clean - user_bundle_buy
+        st.info(f"Сума чистого доходу (збереться з колонки 'Тобі'): **{actual_parts_income} ₴**")
         
-        st.info(f"Твій чистий дохід після комісій Steam: **{actual_parts_income} ₴**")
-        
-        if actual_unpack_profit > 0: 
-            st.metric(f"Чистий Профіт (Автопокупка: ~{instant_unpack_profit} ₴)", f"{actual_unpack_profit} ₴", delta="Вигідно")
-        else: 
-            st.metric(f"Чистий Профіт (Автопокупка: ~{instant_unpack_profit} ₴)", f"{actual_unpack_profit} ₴", delta="Збиток", delta_color="inverse")
+        if actual_unpack_profit > 0: st.metric("Чистий Профіт", f"{actual_unpack_profit} ₴", delta="Вигідно")
+        else: st.metric("Чистий Профіт", f"{actual_unpack_profit} ₴", delta="Збиток", delta_color="inverse")
 
         btn_col1, btn_col2 = st.columns(2)
         with btn_col1:
@@ -285,9 +265,9 @@ def render_trading_logic(res, prefix_key="dash"):
                     st.success("✅ Записано в Портфель!")
 
     st.divider()
-    html_table = "<style>.st-table { width: 100%; border-collapse: collapse; } .st-table th, .st-table td { padding: 10px; border-bottom: 1px solid #2e303e; } .st-table a { color: #66c0f4; text-decoration: none; font-weight: bold; }</style><table class='st-table'><tr><th>Деталь</th><th>Ціна (Брутто)</th><th>Тобі (Чистими)</th><th>Продажі (тижд)</th><th>Дія</th></tr>"
+    html_table = "<style>.st-table { width: 100%; border-collapse: collapse; } .st-table th, .st-table td { padding: 10px; border-bottom: 1px solid #2e303e; } .st-table a { color: #66c0f4; text-decoration: none; font-weight: bold; }</style><table class='st-table'><tr><th>Деталь</th><th>Ціна продажу (Брутто)</th><th>Тобі (Чистими)</th><th>Продажі (тижд)</th><th>Дія</th></tr>"
     for p in res['parts_data']: 
-        html_table += f"<tr><td>{p['Деталь']}</td><td>{p['Ціна']} ₴ <br><span style='color:#888; font-size:0.85em;'>(Авто: ~{p.get('Авто_Брутто', 0)} ₴)</span></td><td style='color:#a3e635;'>{p['Чистими']} ₴ <br><span style='color:#888; font-size:0.85em;'>(Авто: ~{p.get('Авто_Чистими', 0)} ₴)</span></td><td>~{p['Продажі']}</td><td><a href='{p['Link']}'>Купити 🛒</a></td></tr>"
+        html_table += f"<tr><td>{p['Деталь']}</td><td><b>{p['Ціна']} ₴</b></td><td style='color:#a3e635;'><b>{p['Чистими']} ₴</b></td><td>~{p['Продажі']}</td><td><a href='{p['Link']}'>Купити 🛒</a></td></tr>"
     st.markdown(html_table + "</table>", unsafe_allow_html=True)
 
 def render_full_set_dashboard(res, prefix_key):
@@ -328,7 +308,7 @@ def render_full_set_dashboard(res, prefix_key):
 # ==========================================
 with st.sidebar:
     st.title("🛠 Sedrik Dota Tool")
-    st.markdown("`v36.0 | Perfect Math & Fast Sell`")
+    st.markdown("`v38.0 | Clean Market Math`")
     st.divider()
     menu_choice = st.radio("НАВІГАЦІЯ:", ["🔍 Сканер Сетів", "📚 Бібліотека", "💼 Портфель", "📊 Звіти (База)"])
     st.divider()
@@ -365,14 +345,10 @@ if menu_choice == "🔍 Сканер Сетів":
                 for i, item in enumerate(items):
                     status_text.text(f"Сканування ({i+1}/{len(items)}): {item}")
                     data = get_steam_price_data(item)
-                    
                     clean_part = get_clean_income(data['price'])
-                    instant_gross = int(data['price'] * 0.85)
-                    instant_clean = get_clean_income(instant_gross)
                     
                     parts_data.append({
                         "Деталь": item, "Ціна": data['price'], "Чистими": clean_part, 
-                        "Авто_Брутто": instant_gross, "Авто_Чистими": instant_clean,
                         "Продажі": data['volume'], "Link": get_steam_client_url(item)
                     })
                     
@@ -473,12 +449,9 @@ elif menu_choice == "📚 Бібліотека":
                 for i, item_name in enumerate(components_names):
                     data = get_steam_price_data(item_name)
                     clean_part = get_clean_income(data['price'])
-                    instant_gross = int(data['price'] * 0.85)
-                    instant_clean = get_clean_income(instant_gross)
                     
                     parts_data.append({
                         "Деталь": item_name, "Ціна": data['price'], "Чистими": clean_part, 
-                        "Авто_Брутто": instant_gross, "Авто_Чистими": instant_clean,
                         "Продажі": data['volume'], "Link": get_steam_client_url(item_name)
                     })
                     
