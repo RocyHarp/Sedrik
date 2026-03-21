@@ -25,23 +25,23 @@ CURRENCY_UAH = 18
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Referer': 'https://liquipedia.net/dota2/'
+    'Accept-Language': 'en-US,en;q=0.9' # Примусово просимо англійську!
 }
 session = requests.Session()
 session.headers.update(HEADERS)
 
 # --- ІНІЦІАЛІЗАЦІЯ ПАМ'ЯТІ (СЕСІЇ) ---
-if 'dota_result' not in st.session_state:
-    st.session_state.dota_result = None
-if 'lib_result' not in st.session_state:
-    st.session_state.lib_result = None
+if 'dota_result' not in st.session_state: st.session_state.dota_result = None
+if 'lib_result' not in st.session_state: st.session_state.lib_result = None
+if 'deep_scan_result' not in st.session_state: st.session_state.deep_scan_result = None
+if 'scan_count' not in st.session_state: st.session_state.scan_count = 0
+
 if 'preview_sets' not in st.session_state:
     st.session_state.preview_sets = []
-if 'deep_scan_result' not in st.session_state:
-    st.session_state.deep_scan_result = None
-if 'scan_count' not in st.session_state:
-    st.session_state.scan_count = 0
+elif st.session_state.preview_sets and not isinstance(st.session_state.preview_sets[0], dict):
+    st.session_state.preview_sets = []
+elif st.session_state.preview_sets and 'name' not in st.session_state.preview_sets[0]:
+    st.session_state.preview_sets = []
 
 # --- БАЗА ДАНИХ (NEON) ---
 def get_db_connection():
@@ -76,6 +76,8 @@ def add_to_library(set_name, hero, rarity, image_url, components):
     c.execute("SELECT id FROM library WHERE set_name = %s", (set_name,))
     if not c.fetchone():
         c.execute('INSERT INTO library (set_name, hero, rarity, image_url, components) VALUES (%s, %s, %s, %s, %s)', (set_name, hero, rarity, image_url, json.dumps(components)))
+    else:
+        c.execute('UPDATE library SET image_url = %s WHERE set_name = %s', (image_url, set_name))
     conn.commit(); conn.close()
 
 init_db()
@@ -94,37 +96,51 @@ def get_clean_income(market_price: float) -> int:
 def get_steam_client_url(item_name: str) -> str:
     return f"steam://openurl/https://steamcommunity.com/market/listings/{STEAM_APP_ID_DOTA}/{urllib.parse.quote(item_name)}"
 
-# БЕЗПЕЧНЕ ЗАВАНТАЖЕННЯ ФОТО (Фільтруємо заглушки Liquipedia)
+def get_steam_image_url(set_name: str):
+    url = f"https://steamcommunity.com/market/search/render/?query={urllib.parse.quote(set_name)}&start=0&count=1&search_descriptions=0&sort_column=popular&sort_dir=desc&appid=570&category_570_Type%5B%5D=tag_bundle&l=english"
+    try:
+        res = session.get(url, timeout=5).json()
+        soup = BeautifulSoup(res.get("results_html", ""), "html.parser")
+        img_tag = soup.find("img", class_="market_listing_item_img")
+        if img_tag and img_tag.has_attr("src"):
+            return img_tag["src"].replace("/96fx96f", "").replace("/62fx62f", "")
+    except: pass
+    return None
+
 def get_safe_image_bytes(url):
     if not url: return None
     try:
         res = requests.get(url, headers=HEADERS, timeout=5)
-        # Картинка-заглушка "hotlinking not allowed" важить близько 3.5 КБ. Справжні фото більші за 5 КБ.
-        if res.status_code == 200 and len(res.content) > 5000:
+        if res.status_code == 200 and len(res.content) > 8000:
             return res.content
     except: pass
     return None
 
-# --- СУПЕР-ПАРСЕР СЕТІВ ЗІ STEAM (Ціни + Фото) ---
+# --- СУПЕР-ПАРСЕР СЕТІВ ЗІ STEAM ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_steam_market_data():
-    """Викачує топ-500 сетів одразу з цінами та офіційними фото зі Steam"""
     sets_list = []
+    # Жорсткий список сміття, яке не можна брати на вітрину
+    global_junk = ['music', 'announcer', 'hud', 'loading screen', 'cursor', 'league', 'ticket', 'emoticon', 'roshan', 'weather', 'ward', 'taunt', 'tournament']
+    
     for page in range(5):
-        url = f"https://steamcommunity.com/market/search/render/?query=&start={page*100}&count=100&search_descriptions=0&sort_column=popular&sort_dir=desc&appid=570&category_570_Type%5B%5D=tag_bundle&currency={CURRENCY_UAH}"
+        # l=english гарантує оригінальні назви!
+        url = f"https://steamcommunity.com/market/search/render/?query=&start={page*100}&count=100&search_descriptions=0&sort_column=popular&sort_dir=desc&appid=570&category_570_Type%5B%5D=tag_bundle&currency={CURRENCY_UAH}&l=english"
         try:
             res = requests.get(url, headers=HEADERS, timeout=10).json()
             soup = BeautifulSoup(res.get("results_html", ""), "html.parser")
             rows = soup.find_all("a", class_="market_listing_row_link")
             
             for row in rows:
-                # Назва
                 name_tag = row.find("span", class_="market_listing_item_name")
                 if not name_tag: continue
                 raw_name = name_tag.get_text(strip=True)
                 clean_name = raw_name.replace(" Bundle", "").replace(" Set", "")
+                
+                # Відкидаємо турнірні квитки, музику і кур'єрів
+                if any(junk in clean_name.lower() for junk in global_junk):
+                    continue
 
-                # Ціна
                 price_val = 0
                 price_span = row.find("span", class_="sale_price") or row.find("span", class_="normal_price")
                 if price_span:
@@ -132,7 +148,6 @@ def fetch_steam_market_data():
                     p_clean = p_clean.replace(',', '.')
                     if p_clean: price_val = int(float(p_clean))
                     
-                # Офіційне фото зі Steam (ніколи не блокується!)
                 img_url = None
                 img_tag = row.find("img", class_="market_listing_item_img")
                 if img_tag and img_tag.has_attr("src"):
@@ -147,7 +162,6 @@ def fetch_steam_market_data():
         except: pass
         time.sleep(1)
         
-    # Видаляємо дублікати
     unique_sets = {v['name']:v for v in sets_list}.values()
     return list(unique_sets)
 
@@ -166,48 +180,51 @@ def search_correct_page_name(query: str) -> str:
 def get_full_set_info(exact_page_name: str) -> dict:
     url = "https://liquipedia.net/dota2/api.php"
     params = {"action": "parse", "page": exact_page_name.replace(" ", "_"), "format": "json", "prop": "text"}
-    result = {"components": [], "hero": "Невідомий", "rarity": "Невідома", "image_url": None}
+    result = {"components": [], "hero": "Невідомий", "rarity": "Невідома", "image_url": None, "steam_image": None}
     try:
         res = requests.get(url, params=params, headers=HEADERS, timeout=15)
         data = res.json()
-        if "error" in data: return result
-        soup = BeautifulSoup(data["parse"]["text"]["*"], "html.parser")
-        
-        infobox = soup.find(class_=lambda x: x and 'infobox' in x.lower())
-        if infobox:
-            for tag in infobox.find_all(['div', 'th', 'td']):
-                clean_text = tag.get_text(strip=True).replace(":", "").strip()
-                if clean_text == "Hero":
-                    nxt = tag.find_next_sibling(['div', 'td'])
-                    if nxt: result["hero"] = nxt.get_text(strip=True)
-                elif clean_text == "Rarity":
-                    nxt = tag.find_next_sibling(['div', 'td'])
-                    if nxt: result["rarity"] = nxt.get_text(strip=True)
-                    
-        img_div = soup.find("div", class_="infobox-image")
-        if img_div and img_div.find("img"):
-            src = img_div.find("img")["src"]
-            result["image_url"] = "https://liquipedia.net" + src if src.startswith("/") else src
+        if "error" not in data:
+            soup = BeautifulSoup(data["parse"]["text"]["*"], "html.parser")
             
-        stop_words = ["infuser", "treasure", "charm", "gem", "emoticon", "recipe", "ticket", "esports", "token", "taunt"]
-        header = soup.find(lambda tag: tag.name in ['h2', 'h3'] and 'set items' in tag.get_text(strip=True).lower())
-        if header:
-            for tag in header.find_all_next():
-                if tag.name in ['h2', 'h3']: break
-                if tag.name == 'a':
-                    name = tag.get_text(strip=True)
-                    name_lower = name.lower()
-                    is_junk = any(stop_word in name_lower for stop_word in stop_words)
-                    
-                    if (len(name) > 2 and "edit" not in name_lower and "modifier" not in name_lower and 
-                        name_lower != exact_page_name.lower() and name not in result["components"] and not is_junk):
-                        result["components"].append(name)
+            infobox = soup.find(class_=lambda x: x and 'infobox' in x.lower())
+            if infobox:
+                for tag in infobox.find_all(['div', 'th', 'td']):
+                    clean_text = tag.get_text(strip=True).replace(":", "").strip()
+                    if clean_text == "Hero":
+                        nxt = tag.find_next_sibling(['div', 'td'])
+                        if nxt: result["hero"] = nxt.get_text(strip=True)
+                    elif clean_text == "Rarity":
+                        nxt = tag.find_next_sibling(['div', 'td'])
+                        if nxt: result["rarity"] = nxt.get_text(strip=True)
+                        
+            img_div = soup.find("div", class_="infobox-image")
+            if img_div and img_div.find("img"):
+                src = img_div.find("img")["src"]
+                result["image_url"] = "https://liquipedia.net" + src if src.startswith("/") else src
+                
+            stop_words = ["infuser", "treasure", "charm", "gem", "emoticon", "recipe", "ticket", "esports", "token", "taunt"]
+            header = soup.find(lambda tag: tag.name in ['h2', 'h3'] and 'set items' in tag.get_text(strip=True).lower())
+            if header:
+                for tag in header.find_all_next():
+                    if tag.name in ['h2', 'h3']: break
+                    if tag.name == 'a':
+                        name = tag.get_text(strip=True)
+                        name_lower = name.lower()
+                        is_junk = any(stop_word in name_lower for stop_word in stop_words)
+                        
+                        if (len(name) > 2 and "edit" not in name_lower and "modifier" not in name_lower and 
+                            name_lower != exact_page_name.lower() and name not in result["components"] and not is_junk):
+                            result["components"].append(name)
+                            
+        result["steam_image"] = get_steam_image_url(exact_page_name)
     except: pass
     return result
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_steam_price_data(item_name: str) -> dict:
-    url = f"https://steamcommunity.com/market/priceoverview/?appid={STEAM_APP_ID_DOTA}&currency={CURRENCY_UAH}&market_hash_name={urllib.parse.quote(item_name)}"
+    # l=english гарантує, що ми питаємо правильну назву
+    url = f"https://steamcommunity.com/market/priceoverview/?appid={STEAM_APP_ID_DOTA}&currency={CURRENCY_UAH}&market_hash_name={urllib.parse.quote(item_name)}&l=english"
     result = {"price": 0, "volume": 0}
     try:
         res = session.get(url, timeout=10)
@@ -229,7 +246,7 @@ def render_trading_logic(res, prefix_key="dash"):
     st.markdown("### 🧮 Розрахунок прибутку")
     
     if res['total_parts_price'] == 0 or res['bundle_data']['price'] == 0:
-        st.warning("⚠️ **Обережно:** Steam повернув нульові ціни. Це означає, що у тебе тимчасовий блок запитів (Rate Limit). Зачекай пару хвилин і натисни кнопку нижче.")
+        st.warning("⚠️ **Обережно:** Steam повернув нульові ціни. Зачекай пару хвилин і натисни кнопку нижче.")
         if st.button("🔄 Перегенерувати ціни (Зняти нулі)", type="primary", key=f"rescan_{safe_key}"):
             get_steam_price_data.clear()
             with st.spinner("Перевіряю ціни наново..."):
@@ -313,11 +330,10 @@ def render_full_set_dashboard(res, prefix_key, check_easter_egg=False):
                     st.caption("✨ Опа, пасхалочка! Гарного дня!")
                 else: st.info("📷 Пасхалка не знайдена")
             else:
-                # ПРІОРИТЕТ: Спочатку перевіряємо, чи є офіційне фото зі Steam (воно ніколи не ламається)
-                if res.get('steam_image'):
-                    st.image(res['steam_image'], use_container_width=True)
-                # ЯКЩО НЕМАЄ, беремо фото з Liquipedia, але пропускаємо його через фільтр-захист
-                elif res['set_info']["image_url"]:
+                best_img_url = res.get('steam_image') or res['set_info'].get('steam_image')
+                if best_img_url:
+                    st.image(best_img_url, use_container_width=True)
+                elif res['set_info'].get("image_url"):
                     safe_img = get_safe_image_bytes(res['set_info']["image_url"])
                     if safe_img: st.image(safe_img, use_container_width=True)
                     else: st.info("📷 Фото заблоковано Liquipedia")
@@ -332,8 +348,7 @@ def render_full_set_dashboard(res, prefix_key, check_easter_egg=False):
                 st.markdown(f"<a href='{get_steam_client_url(res['exact_name'])}' style='display: inline-block; padding: 6px 15px; background-color: #1a2838; color: #66c0f4; text-decoration: none; border-radius: 4px; border: 1px solid #101822; width: 100%; text-align: center; font-weight: bold;'>Відкрити бандл у Steam 🔗</a>", unsafe_allow_html=True)
             with col_lib:
                 components_to_save = [{"name": p['Деталь'], "last_price": p['Ціна']} for p in res['parts_data']]
-                # Зберігаємо також офіційне фото зі Steam у Бібліотеку, щоб воно там не ламалося!
-                img_to_save = res.get('steam_image') or res['set_info']['image_url']
+                img_to_save = res.get('steam_image') or res['set_info'].get('steam_image') or res['set_info'].get('image_url')
                 if st.button("📚 Зберегти в Бібліотеку", key=f"btn_lib_{prefix_key}", use_container_width=True):
                     add_to_library(res['exact_name'], res['set_info']['hero'], res['set_info']['rarity'], img_to_save, components_to_save)
                     st.success("✅ Збережено назавжди!")
@@ -346,7 +361,7 @@ def render_full_set_dashboard(res, prefix_key, check_easter_egg=False):
 # ==========================================
 with st.sidebar:
     st.title("🛠 Sedrik Dota Tool")
-    st.markdown("`v30.0 | Instant Showcase Edition`")
+    st.markdown("`v32.0 | English Locale & Junk Fix`")
     st.divider()
     menu_choice = st.radio("НАВІГАЦІЯ:", ["🔍 Сканер Сетів", "🎲 Рандомна Вітрина", "📚 Бібліотека", "💼 Портфель", "📊 Звіти (База)"])
     st.divider()
@@ -404,11 +419,11 @@ if menu_choice == "🔍 Сканер Сетів":
         render_full_set_dashboard(st.session_state.dota_result, prefix_key="single_scan", check_easter_egg=True)
 
 # ==========================================
-# СТОРІНКА 1.5: РАНДОМНА ВІТРИНА (МИТТЄВА)
+# СТОРІНКА 1.5: РАНДОМНА ВІТРИНА
 # ==========================================
 elif menu_choice == "🎲 Рандомна Вітрина":
     st.header("🎲 Вітрина Сетів (Миттєва генерація)")
-    st.markdown("Програма бере сети напряму з бази Steam. **Ціни і фотографії з'являються миттєво!** Тобі більше не треба чекати.")
+    st.markdown("Програма бере сети напряму з бази Steam. **Ціни і фотографії з'являються миттєво!**")
     
     with st.spinner("Синхронізую базу ринку Steam..."):
         MARKET_DB = fetch_steam_market_data()
@@ -424,11 +439,9 @@ elif menu_choice == "🎲 Рандомна Вітрина":
             auto_scan_btn = st.button("🚀 Оновити вітрину", type="primary", use_container_width=True)
 
         if auto_scan_btn:
-            # Оскільки база вже скачана з цінами, генерація займає 0.01 секунди
             st.session_state.preview_sets = random.sample(MARKET_DB, min(showcase_limit, len(MARKET_DB)))
             st.session_state.deep_scan_result = None 
 
-        # МАЛЮЄМО ВІТРИНУ
         if st.session_state.preview_sets:
             st.subheader("🛍️ Твої знахідки:")
             
@@ -439,16 +452,15 @@ elif menu_choice == "🎲 Рандомна Вітрина":
                         p_res = st.session_state.preview_sets[i + j]
                         with cols[j]:
                             with st.container(border=True):
-                                # ФОТО ЗІ STEAM (Працює завжди)
-                                if p_res['image_url']:
+                                if p_res.get('image_url'):
                                     st.image(p_res['image_url'], use_container_width=True)
                                 else:
                                     st.info("📷 Нема фото")
                                 
-                                st.markdown(f"**{p_res['name']}**")
-                                st.markdown(f"💰 Ціна: **{p_res['price']} ₴**")
+                                st.markdown(f"**{p_res.get('name', 'Невідомо')}**")
+                                st.markdown(f"💰 Ціна: **{p_res.get('price', 0)} ₴**")
                                 
-                                if st.button("🔬 Аналізувати", key=f"deep_{i+j}_{p_res['name']}", use_container_width=True):
+                                if st.button("🔬 Аналізувати", key=f"deep_{i+j}_{p_res.get('name', i)}", use_container_width=True):
                                     with st.spinner(f"Сканую деталі для {p_res['name']}..."):
                                         exact_name = search_correct_page_name(p_res['name'])
                                         set_info = get_full_set_info(exact_name)
@@ -464,20 +476,21 @@ elif menu_choice == "🎲 Рандомна Вітрина":
                                                 parts_data.append({"Деталь": item, "Ціна": data['price'], "Чистими": clean_part, "Продажі": data['volume'], "Link": get_steam_client_url(item)})
                                                 total_parts_price += data['price']
                                                 total_parts_clean_income += clean_part
+                                        else:
+                                            st.error("❌ Liquipedia не знає такого сету (можливо, це турнірний квиток або старе сміття).")
                                             
                                         st.session_state.deep_scan_result = {
                                             "exact_name": exact_name,
                                             "set_info": set_info,
-                                            "steam_image": p_res['image_url'], # ПЕРЕДАЄМО НЕЗЛАМНЕ ФОТО
-                                            "bundle_data": {"price": p_res['price'], "volume": 0},
+                                            "steam_image": p_res.get('image_url'),
+                                            "bundle_data": {"price": p_res.get('price', 0), "volume": 0},
                                             "parts_data": parts_data,
                                             "total_parts_price": total_parts_price,
                                             "total_parts_clean_income": total_parts_clean_income
                                         }
                                     st.rerun()
 
-        # ПОВНИЙ ДАШБОРД ПІД ВІТРИНОЮ
-        if st.session_state.deep_scan_result:
+        if st.session_state.deep_scan_result and st.session_state.deep_scan_result["parts_data"]:
             st.divider()
             st.subheader("🎯 Результати глибокого аналізу:")
             render_full_set_dashboard(st.session_state.deep_scan_result, prefix_key="deep_scan_dash", check_easter_egg=False)
@@ -521,14 +534,13 @@ elif menu_choice == "📚 Бібліотека":
         with st.container(border=True):
             col_img, col_details = st.columns([1, 2.5])
             with col_img:
-                # В бібліотеці також використовуємо безпечне завантаження, якщо це старі сети без Steam-фоток
                 if selected_set['image_url']:
                     if "steamstatic" in selected_set['image_url']:
                         st.image(selected_set['image_url'], use_container_width=True)
                     else:
                         safe_img = get_safe_image_bytes(selected_set['image_url'])
                         if safe_img: st.image(safe_img, use_container_width=True)
-                        else: st.info("📷 Фото заблоковано")
+                        else: st.info("📷 Фото заблоковано. Натисни 'Оновити ціни', щоб відновити!")
                 else: st.info("📷 Помилка фото")
                 
             with col_details:
@@ -574,16 +586,19 @@ elif menu_choice == "📚 Бібліотека":
                     my_bar.progress((i + 1) / len(components_names))
                 my_bar.empty()
                 
+                new_steam_img = get_steam_image_url(selected_set_name)
+                img_to_keep = new_steam_img or selected_set['image_url']
+                
                 conn = get_db_connection()
                 c = conn.cursor()
-                c.execute("UPDATE library SET components = %s WHERE id = %s", (json.dumps(updated_components_for_db), selected_set['id']))
+                c.execute("UPDATE library SET components = %s, image_url = %s WHERE id = %s", (json.dumps(updated_components_for_db), img_to_keep, selected_set['id']))
                 conn.commit(); conn.close()
                 
                 st.session_state.lib_result = {
                     "exact_name": selected_set_name, "bundle_data": bundle_data, "parts_data": parts_data, 
                     "total_parts_price": total_parts_price, "total_parts_clean_income": total_parts_clean_income,
                     "last_updated": datetime.now(),
-                    "steam_image": selected_set['image_url'] if "steamstatic" in selected_set['image_url'] else None
+                    "steam_image": new_steam_img 
                 }
                 st.rerun()
 
