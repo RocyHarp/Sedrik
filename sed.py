@@ -30,6 +30,23 @@ HEADERS = {
 session = requests.Session()
 session.headers.update(HEADERS)
 
+# --- РЕЗЕРВНА БАЗА (ЯКЩО STEAM ДАЄ БАН) ---
+FALLBACK_SETS = [
+    "Guilt of the Survivor", "The Magus Magnus", "Pilgrimage of the Bladeform Aesthete",
+    "Fathomless Deep", "Lineage of the Stormlords", "Garb of the Cruel Magician",
+    "Bindings of the Deep Magma", "Golden Reel Guardian", "Endowments of the Lucent Canopy",
+    "Gifts of the Heavenly General", "Armor of the Unyielding Mask", "Scales of the Lycanthrope",
+    "Vestments of the Fallen Princess", "Tools of the Hellsworn", "Garb of the Consuming Tides",
+    "Wrath of the Ka", "Echoes of the Eyrie", "Fires of Vashundol", "Jiekuo's Gift",
+    "The Boreal Watch", "Artillery of the Crested Dawn", "Scorching Princess",
+    "Empire of the Blood Chieftain", "The Igneous Stone", "Secrets of the Merqueen",
+    "Dark Artistry", "Raiments of the Sacrificed", "The Ram's Head Armament",
+    "Warrior of the Steppe", "The Defiant Fiend", "Iceburst", "Frostiron Sorceress",
+    "Regalia of the Wraith Lord", "Brawler of the Glacier Sea", "Volatile Firmament",
+    "The Onyx Fume", "Wandering Demon of the Plains", "The Fiend Cleaver",
+    "Ember Crane", "Acolyte of Vengeance", "The Exiled Demon"
+]
+
 # --- ІНІЦІАЛІЗАЦІЯ ПАМ'ЯТІ (СЕСІЇ) ---
 if 'dota_result' not in st.session_state:
     st.session_state.dota_result = None
@@ -77,7 +94,7 @@ def add_to_library(set_name, hero, rarity, image_url, components):
 
 init_db()
 
-# --- ДОПОМІЖНІ ФУНКЦІЇ (СТАРА СИСТЕМА ЦІН) ---
+# --- ДОПОМІЖНІ ФУНКЦІЇ ---
 def get_clean_income(market_price: float) -> int:
     market_price = int(market_price)
     if market_price <= 0: return 0
@@ -91,25 +108,6 @@ def get_clean_income(market_price: float) -> int:
 def get_steam_client_url(item_name: str) -> str:
     return f"steam://openurl/https://steamcommunity.com/market/listings/{STEAM_APP_ID_DOTA}/{urllib.parse.quote(item_name)}"
 
-# --- РАДАР: ВИТЯГУВАННЯ БАЗИ ЗІ STEAM ---
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_all_steam_bundles_names():
-    sets_list = []
-    for page in range(5):
-        url = f"https://steamcommunity.com/market/search/render/?query=&start={page*100}&count=100&search_descriptions=0&sort_column=popular&sort_dir=desc&appid=570&category_570_Type%5B%5D=tag_bundle"
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=10).json()
-            soup = BeautifulSoup(res.get("results_html", ""), "html.parser")
-            rows = soup.find_all("span", class_="market_listing_item_name")
-            for row in rows:
-                raw_name = row.get_text(strip=True)
-                clean_name = raw_name.replace(" Bundle", "").replace(" Set", "")
-                sets_list.append(clean_name)
-        except: pass
-        time.sleep(1)
-    return list(set(sets_list))
-
-# --- КЕШОВАНІ ЗАПИТИ ДЛЯ СКАНЕРА ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def search_correct_page_name(query: str) -> str:
     url = "https://liquipedia.net/dota2/api.php"
@@ -147,14 +145,20 @@ def get_full_set_info(exact_page_name: str) -> dict:
         if img_div and img_div.find("img"):
             src = img_div.find("img")["src"]
             result["image_url"] = "https://liquipedia.net" + src if src.startswith("/") else src
-                    
+            
+        stop_words = ["infuser", "treasure", "charm", "gem", "emoticon", "recipe", "ticket", "esports", "token", "taunt"]
+        
         header = soup.find(lambda tag: tag.name in ['h2', 'h3'] and 'set items' in tag.get_text(strip=True).lower())
         if header:
             for tag in header.find_all_next():
                 if tag.name in ['h2', 'h3']: break
                 if tag.name == 'a':
                     name = tag.get_text(strip=True)
-                    if len(name) > 2 and "edit" not in name.lower() and "modifier" not in name.lower() and name.lower() != exact_page_name.lower() and name not in result["components"]:
+                    name_lower = name.lower()
+                    is_junk = any(stop_word in name_lower for stop_word in stop_words)
+                    
+                    if (len(name) > 2 and "edit" not in name_lower and "modifier" not in name_lower and 
+                        name_lower != exact_page_name.lower() and name not in result["components"] and not is_junk):
                         result["components"].append(name)
     except: pass
     return result
@@ -178,18 +182,34 @@ def get_steam_price_data(item_name: str) -> dict:
 
 # --- ФУНКЦІЇ МАЛЮВАННЯ ДАШБОРДІВ ---
 def render_trading_logic(res, prefix_key="dash"):
+    safe_key = f"{prefix_key}_{res['exact_name']}"
     st.markdown("### 🧮 Розрахунок прибутку")
     
-    if res['total_parts_price'] == 0:
-        st.warning("⚠️ **ОБЕРЕЖНО:** Steam повернув нульові ціни. Можливо, деталі не продаються на Маркеті, або ти отримав тимчасовий блок запитів (зачекай 5 хвилин).")
-        
+    if res['total_parts_price'] == 0 or res['bundle_data']['price'] == 0:
+        st.warning("⚠️ **Обережно:** Steam повернув нульові ціни. Це означає, що у тебе тимчасовий блок запитів (Rate Limit). Зачекай пару хвилин і натисни кнопку нижче.")
+        if st.button("🔄 Перегенерувати ціни (Зняти нулі)", type="primary", key=f"rescan_{safe_key}"):
+            get_steam_price_data.clear()
+            with st.spinner("Перевіряю ціни наново..."):
+                items = [p['Деталь'] for p in res['parts_data']]
+                res['bundle_data'] = get_steam_price_data(res['exact_name'])
+                res['parts_data'] = []
+                t_p = 0; t_c = 0
+                for item in items:
+                    d = get_steam_price_data(item)
+                    c = get_clean_income(d['price'])
+                    res['parts_data'].append({"Деталь": item, "Ціна": d['price'], "Чистими": c, "Продажі": d['volume'], "Link": get_steam_client_url(item)})
+                    t_p += d['price']
+                    t_c += c
+                res['total_parts_price'] = t_p
+                res['total_parts_clean_income'] = t_c
+            st.rerun()
+
     tab1, tab2 = st.tabs(["🎁 СТРАТЕГІЯ 1: ПАКУВАННЯ", "✂️ СТРАТЕГІЯ 2: РОЗПАКУВАННЯ"])
-    safe_key = f"{prefix_key}_{res['exact_name']}"
     
     with tab1:
         col_in1, col_in2 = st.columns(2)
-        user_buy_price = col_in1.number_input("За скільки КУПИВ всі частини (сума ₴):", value=float(res['total_parts_price']), step=1.0, key=f"buy_pack_{safe_key}")
-        user_sell_price = col_in2.number_input("За скільки ПРОДАШ цілий бандл (брутто ₴):", value=float(res['bundle_data']['price']), step=1.0, key=f"sell_pack_{safe_key}")
+        user_buy_price = col_in1.number_input("За скільки КУПИВ всі частини (сума ₴):", value=int(res['total_parts_price']), step=1, key=f"buy_pack_{safe_key}")
+        user_sell_price = col_in2.number_input("За скільки ПРОДАШ цілий бандл (брутто ₴):", value=int(res['bundle_data']['price']), step=1, key=f"sell_pack_{safe_key}")
         
         actual_bundle_income = get_clean_income(user_sell_price)
         actual_pack_profit = actual_bundle_income - user_buy_price
@@ -203,23 +223,22 @@ def render_trading_logic(res, prefix_key="dash"):
         with btn_col1:
             if st.button("📊 Додати у ЗВІТ (Вже продано)", type="primary", use_container_width=True, key=f"rep_pack_{safe_key}"):
                 if user_buy_price > 0:
-                    save_to_reports(res['exact_name'], "Пакування", int(user_buy_price), int(actual_pack_profit))
+                    save_to_reports(res['exact_name'], "Пакування", user_buy_price, actual_pack_profit)
                     st.success("✅ Записано в Звіти!")
         with btn_col2:
             if st.button("💼 Додати у ПОРТФЕЛЬ", use_container_width=True, key=f"port_pack_{safe_key}"):
                 if user_buy_price > 0:
-                    add_to_portfolio(res['exact_name'] + " (Збірка)", int(user_buy_price), int(user_sell_price))
+                    add_to_portfolio(res['exact_name'] + " (Збірка)", user_buy_price, user_sell_price)
                     st.success("✅ Записано в Портфель!")
 
     with tab2:
         col_in1, col_in2 = st.columns(2)
-        user_bundle_buy = col_in1.number_input("За скільки КУПИВ цілий бандл (₴):", value=float(res['bundle_data']['price']), step=1.0, key=f"buy_unpack_{safe_key}")
-        user_parts_sell = col_in2.number_input("За скільки ПРОДАШ всі деталі (брутто ₴):", value=float(res['total_parts_price']), step=1.0, key=f"sell_unpack_{safe_key}")
+        user_bundle_buy = col_in1.number_input("За скільки КУПИВ цілий бандл (₴):", value=int(res['bundle_data']['price']), step=1, key=f"buy_unpack_{safe_key}")
+        actual_parts_income = col_in2.number_input("Твій сумарний ЧИСТИЙ дохід з деталей (₴):", value=int(res['total_parts_clean_income']), step=1, key=f"sell_unpack_{safe_key}")
         
-        actual_parts_income = get_clean_income(user_parts_sell)
         actual_unpack_profit = actual_parts_income - user_bundle_buy
         
-        st.info(f"Твій чистий дохід після комісій Steam: **{actual_parts_income} ₴**")
+        st.info(f"Сума чистого доходу береться з колонки 'Тобі' для кожної деталі: **{actual_parts_income} ₴**")
         
         if actual_unpack_profit > 0: st.metric("Чистий Профіт", f"{actual_unpack_profit} ₴", delta="Вигідно")
         else: st.metric("Чистий Профіт", f"{actual_unpack_profit} ₴", delta="Збиток", delta_color="inverse")
@@ -228,12 +247,12 @@ def render_trading_logic(res, prefix_key="dash"):
         with btn_col1:
             if st.button("📊 Додати у ЗВІТ (Вже продано)", type="primary", use_container_width=True, key=f"rep_unpack_{safe_key}"):
                 if user_bundle_buy > 0:
-                    save_to_reports(res['exact_name'], "Розпакування", int(user_bundle_buy), int(actual_unpack_profit))
+                    save_to_reports(res['exact_name'], "Розпакування", user_bundle_buy, actual_unpack_profit)
                     st.success("✅ Записано в Звіти!")
         with btn_col2:
             if st.button("💼 Додати у ПОРТФЕЛЬ", use_container_width=True, key=f"port_unpack_{safe_key}"):
                 if user_bundle_buy > 0:
-                    add_to_portfolio(res['exact_name'] + " (Розпаковка)", int(user_bundle_buy), int(user_parts_sell))
+                    add_to_portfolio(res['exact_name'] + " (Розпаковка)", user_bundle_buy, res['total_parts_price'])
                     st.success("✅ Записано в Портфель!")
 
     st.divider()
@@ -242,7 +261,6 @@ def render_trading_logic(res, prefix_key="dash"):
     st.markdown(html_table + "</table>", unsafe_allow_html=True)
 
 def render_full_set_dashboard(res, prefix_key, check_easter_egg=False):
-    """Малює весь блок з картинкою, кнопками і викликає таблицю."""
     with st.container(border=True):
         col_img, col_info = st.columns([1, 3])
         with col_img:
@@ -280,7 +298,7 @@ def render_full_set_dashboard(res, prefix_key, check_easter_egg=False):
 # ==========================================
 with st.sidebar:
     st.title("🛠 Sedrik Dota Tool")
-    st.markdown("`v20.0 | Classic Price System`")
+    st.markdown("`v27.0 | Bulldog Randomizer`")
     st.divider()
     menu_choice = st.radio("НАВІГАЦІЯ:", ["🔍 Сканер Сетів", "🎲 Рандомний Сканер", "📚 Бібліотека", "💼 Портфель", "📊 Звіти (База)"])
     st.divider()
@@ -291,7 +309,7 @@ with st.sidebar:
 if menu_choice == "🔍 Сканер Сетів":
     st.header("🔍 Арбітражний сканер сетів Dota 2")
     with st.sidebar:
-        query = st.text_input("Введи назву сету:", placeholder="Наприклад: Guilt of the Survivor")
+        query = st.text_input("Введи назву сету:", placeholder="Наприклад: Primeval Predator")
         analyze_btn = st.button("🚀 ЗНАЙТИ ПРОФІТ", type="primary", use_container_width=True)
 
     if analyze_btn and query:
@@ -338,39 +356,68 @@ if menu_choice == "🔍 Сканер Сетів":
         render_full_set_dashboard(st.session_state.dota_result, prefix_key="single_scan", check_easter_egg=True)
 
 # ==========================================
-# СТОРІНКА 1.5: РАНДОМНИЙ СКАНЕР (АВТО-СТРІЧКА)
+# СТОРІНКА 1.5: РАНДОМНИЙ СКАНЕР (Вдосконалений)
 # ==========================================
 elif menu_choice == "🎲 Рандомний Сканер":
-    st.header("🎲 Рандомний Сканер (Стрічка)Пока очень баганий")
-    st.markdown("Програма витягує випадкові сети зі Steam Market і повністю аналізує їх для тебе.")
-    
-    with st.spinner("🔄 Оновлюю базу популярних сетів зі Steam..."):
-        ALL_STEAM_SETS = fetch_all_steam_bundles_names()
+    st.header("🎲 Рандомний Сканер (Справжній рандом)")
+    st.markdown("Програма стрибає на **випадкову сторінку Торгового майданчика Steam**, шукає серед лотів ТІЛЬКИ робочі сети і виводить їх тобі.")
     
     col1, col2 = st.columns([3, 1])
     with col1:
-        if ALL_STEAM_SETS: st.info(f"Доступно **{len(ALL_STEAM_SETS)}** різних сетів.")
-        else: st.error("Steam тимчасово блокує масові запити. Спробуй через 10 хвилин.")
+        st.info("💡 Якщо Steam заблокує прямий пошук, програма автоматично перемкнеться на внутрішню резервну базу. Твій скан більше ніколи не зупиниться!")
     with col2:
         n_random = st.slider("Скільки сетів дістати?", min_value=1, max_value=5, value=2)
-        auto_scan_btn = st.button("🚀 Дістати сети", type="primary", use_container_width=True)
+        auto_scan_btn = st.button("🚀 Випробувати удачу", type="primary", use_container_width=True)
 
-    if auto_scan_btn and ALL_STEAM_SETS:
-        sets_to_scan = random.sample(ALL_STEAM_SETS, min(n_random, len(ALL_STEAM_SETS)))
-        st.warning(f"⏳ Сканую {len(sets_to_scan)} сетів. Зачекай приблизно {len(sets_to_scan) * 10} сек...")
+    if auto_scan_btn:
+        with st.spinner("Звертаюсь до Steam Market за випадковою сторінкою (дістаю 50 лотів)..."):
+            random_start = random.randint(0, 300) * 10
+            # Дістаємо одразу 50 лотів, щоб точно знайти серед них робочі сети
+            url = f"https://steamcommunity.com/market/search/render/?query=&start={random_start}&count=50&search_descriptions=0&sort_column=popular&sort_dir=desc&appid=570&category_570_Type%5B%5D=tag_bundle"
+            
+            raw_sets = []
+            try:
+                res = requests.get(url, headers=HEADERS, timeout=5)
+                if res.status_code == 200:
+                    soup = BeautifulSoup(res.json().get("results_html", ""), "html.parser")
+                    rows = soup.find_all("span", class_="market_listing_item_name")
+                    for row in rows:
+                        raw_name = row.get_text(strip=True)
+                        clean_name = raw_name.replace(" Bundle", "").replace(" Set", "")
+                        raw_sets.append(clean_name)
+            except:
+                pass
+                
+            raw_sets = list(set(raw_sets))
+        
+        # Якщо Steam пустий, беремо резервну базу
+        if not raw_sets:
+            raw_sets = FALLBACK_SETS.copy()
+            st.toast("⚠️ Steam приховав сторінку пошуку. Використовую надійну резервну базу сетів!")
+        else:
+            st.toast(f"✅ Знайдено вибірку на {random_start}-й позиції маркету!")
+
+        random.shuffle(raw_sets) # Перемішуємо вибірку
+        st.warning(f"⏳ Шукаю рівно {n_random} робочих сетів. Програма ігноруватиме сміття. Зачекай...")
         
         results_list = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        for i, raw_name in enumerate(sets_to_scan):
-            status_text.text(f"🔍 Парсинг ({i+1}/{len(sets_to_scan)}): {raw_name}")
+        for raw_name in raw_sets:
+            # ЗУПИНЯЄМОСЯ, як тільки знайшли потрібну кількість
+            if len(results_list) >= n_random:
+                break
+                
+            status_text.text(f"🔍 Парсинг: перевіряю '{raw_name}'...")
             
             exact_name = search_correct_page_name(raw_name)
             set_info = get_full_set_info(exact_name)
             items = set_info["components"]
             
+            # Якщо це реальний сет і в ньому є деталі — скануємо ціни!
             if items:
+                status_text.text(f"💰 Знайдено робочий сет '{exact_name}'! Сканую ціни...")
                 bundle_data = get_steam_price_data(exact_name)
                 parts_data = []
                 total_parts_price = 0
@@ -388,20 +435,23 @@ elif menu_choice == "🎲 Рандомний Сканер":
                     "parts_data": parts_data, "total_parts_price": total_parts_price,
                     "total_parts_clean_income": total_parts_clean_income
                 })
-            
-            progress_bar.progress((i + 1) / len(sets_to_scan))
+                
+                progress_bar.progress(len(results_list) / n_random)
         
         status_text.empty()
         progress_bar.empty()
         
-        st.session_state.random_results = results_list
-        st.success(f"🎉 Готово! Проскановано {len(results_list)} сетів.")
+        if results_list:
+            st.session_state.random_results = results_list
+            st.success(f"🎉 Готово! Знайдено {len(results_list)} робочих сетів.")
+        else:
+            st.error("На жаль, у цій вибірці не виявилося жодного робочого сету. Натисни кнопку ще раз!")
 
     if st.session_state.random_results:
         st.divider()
-        st.subheader("👇 Твоя стрічка знахідок")
+        st.subheader("👇 Твоя рандомна стрічка знахідок")
         for idx, res in enumerate(st.session_state.random_results):
-            unique_prefix = f"auto_{idx}_{res['exact_name']}"
+            unique_prefix = f"rand_{idx}_{res['exact_name']}"
             render_full_set_dashboard(res, prefix_key=unique_prefix, check_easter_egg=False)
             st.write("---")
 
@@ -422,7 +472,6 @@ elif menu_choice == "📚 Бібліотека":
         st.info("💡 Твоя Бібліотека поки що порожня. Зайди у 'Сканер Сетів' і збережи сет.")
     else:
         set_names = [s['set_name'] for s in lib_sets]
-        
         col_sel, col_del = st.columns([4, 1])
         with col_sel:
             selected_set_name = st.selectbox("📌 Обери сет для перегляду:", set_names, label_visibility="collapsed")
@@ -442,7 +491,6 @@ elif menu_choice == "📚 Бібліотека":
         old_total_value = sum([comp.get('last_price', 0) for comp in components_raw if isinstance(comp, dict)])
         
         st.write("")
-        
         with st.container(border=True):
             col_img, col_details = st.columns([1, 2.5])
             with col_img:
@@ -488,7 +536,6 @@ elif menu_choice == "📚 Бібліотека":
                 for i, item_name in enumerate(components_names):
                     data = get_steam_price_data(item_name)
                     clean_part = get_clean_income(data['price'])
-                    
                     parts_data.append({"Деталь": item_name, "Ціна": data['price'], "Чистими": clean_part, "Продажі": data['volume'], "Link": get_steam_client_url(item_name)})
                     total_parts_price += data['price']
                     total_parts_clean_income += clean_part
@@ -534,8 +581,8 @@ elif menu_choice == "💼 Портфель":
             current_row = df_p[df_p['id'] == selected_id].iloc[0]
             item_name = current_row['item_name']
             col1, col2 = st.columns(2)
-            new_buy = col1.number_input("Ціна покупки (₴):", value=float(current_row['buy_price']), step=1.0, key="edit_buy")
-            new_target = col2.number_input("Фактична ціна продажу (брутто ₴):", value=float(current_row['target_price']), step=1.0, key="edit_sell")
+            new_buy = col1.number_input("Ціна покупки (₴):", value=int(current_row['buy_price']), step=1, key="edit_buy")
+            new_target = col2.number_input("Фактична ціна продажу (брутто ₴):", value=int(current_row['target_price']), step=1, key="edit_sell")
             if st.button("💾 Оновити ціни в Портфелі"):
                 conn = get_db_connection()
                 c = conn.cursor()
@@ -548,7 +595,7 @@ elif menu_choice == "💼 Портфель":
                 if st.button("📊 ПРОДАНО! Відправити у Звіт", type="primary", use_container_width=True):
                     clean_income = get_clean_income(new_target)
                     final_profit = clean_income - new_buy
-                    save_to_reports(item_name, "Продаж з портфеля", int(new_buy), int(final_profit))
+                    save_to_reports(item_name, "Продаж з портфеля", new_buy, final_profit)
                     conn = get_db_connection()
                     c = conn.cursor()
                     c.execute("DELETE FROM portfolio WHERE id = %s", (int(selected_id),))
