@@ -35,6 +35,10 @@ session.cookies.set('steamCurrencyId', str(CURRENCY_UAH), domain='steamcommunity
 if 'dota_result' not in st.session_state: st.session_state.dota_result = None
 if 'lib_result' not in st.session_state: st.session_state.lib_result = None
 
+if 'preview_sets' not in st.session_state: st.session_state.preview_sets = []
+elif st.session_state.preview_sets and not isinstance(st.session_state.preview_sets[0], dict): st.session_state.preview_sets = []
+elif st.session_state.preview_sets and 'name' not in st.session_state.preview_sets[0]: st.session_state.preview_sets = []
+
 # --- БАЗА ДАНИХ (NEON) ---
 def get_db_connection():
     return psycopg2.connect(st.secrets["DB_URL"])
@@ -74,17 +78,11 @@ def add_to_library(set_name, hero, rarity, image_url, components):
 
 init_db()
 
-# --- ДОПОМІЖНІ ФУНКЦІЇ ---
+# --- ДОПОМІЖНІ ФУНКЦІЇ (ПРОСТА МАТЕМАТИКА 13%) ---
 def get_clean_income(market_price: float) -> int:
-    """Точно вираховує чистий дохід, знімаючи мінімум 2 грн, тому 3 грн -> 1 грн"""
-    market_price = int(market_price)
+    """Тупо віднімаємо 13% і округляємо до цілого числа"""
     if market_price <= 0: return 0
-    for base in range(market_price, 0, -1):
-        dota_fee = max(1, int(base * 0.10 + 0.5))
-        steam_fee = max(1, int(base * 0.05 + 0.5))
-        if base + dota_fee + steam_fee <= market_price: 
-            return base
-    return 0
+    return int(round(market_price * 0.87))
 
 def get_steam_client_url(item_name: str) -> str:
     return f"steam://openurl/https://steamcommunity.com/market/listings/{STEAM_APP_ID_DOTA}/{urllib.parse.quote(item_name)}"
@@ -113,6 +111,47 @@ def get_safe_image_bytes(url):
             return res.content
     except: pass
     return None
+
+# --- СУПЕР-ПАРСЕР СЕТІВ ЗІ STEAM ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_steam_market_data():
+    sets_list = []
+    global_junk = ['music', 'announcer', 'hud', 'loading screen', 'cursor', 'league', 'ticket', 'emoticon', 'roshan', 'weather', 'ward', 'taunt', 'tournament']
+    
+    for page in range(5):
+        url = f"https://steamcommunity.com/market/search/render/?query=&start={page*100}&count=100&search_descriptions=0&sort_column=popular&sort_dir=desc&appid=570&category_570_Type%5B%5D=tag_bundle&l=english"
+        try:
+            res = session.get(url, timeout=10).json()
+            soup = BeautifulSoup(res.get("results_html", ""), "html.parser")
+            rows = soup.find_all("a", class_="market_listing_row_link")
+            
+            for row in rows:
+                name_tag = row.find("span", class_="market_listing_item_name")
+                if not name_tag: continue
+                raw_name = name_tag.get_text(strip=True)
+                clean_name = raw_name.replace(" Bundle", "").replace(" Set", "")
+                
+                if any(junk in clean_name.lower() for junk in global_junk): continue
+
+                price_val = 0
+                price_span = row.find("span", class_="sale_price") or row.find("span", class_="normal_price")
+                if price_span:
+                    p_clean = "".join([c for c in price_span.get_text(strip=True) if c.isdigit() or c in [',', '.']])
+                    p_clean = p_clean.replace(',', '.')
+                    if p_clean: price_val = int(float(p_clean))
+                    
+                img_url = None
+                img_tag = row.find("img", class_="market_listing_item_img")
+                if img_tag and img_tag.has_attr("src"):
+                    img_url = img_tag["src"].replace("/96fx96f", "").replace("/62fx62f", "")
+
+                if price_val > 0:
+                    sets_list.append({"name": clean_name, "price": price_val, "image_url": img_url})
+        except: pass
+        time.sleep(1)
+        
+    unique_sets = {v['name']:v for v in sets_list}.values()
+    return list(unique_sets)
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def search_correct_page_name(query: str) -> str:
@@ -193,7 +232,7 @@ def render_trading_logic(res, prefix_key="dash"):
     st.markdown("### 🧮 Розрахунок прибутку")
     
     if res['total_parts_price'] == 0 or res['bundle_data']['price'] == 0:
-        st.warning("⚠️ **Обережно:** Steam повернув нульові ціни. Зачекай пару хвилин і натисни кнопку нижче.")
+        st.warning("⚠️ **Обережно:** Steam повернув нульові ціни. Можливо, тимчасовий блок запитів. Зачекай пару хвилин і натисни кнопку нижче.")
         if st.button("🔄 Перегенерувати ціни (Зняти нулі)", type="primary", key=f"rescan_{safe_key}"):
             get_steam_price_data.clear()
             with st.spinner("Перевіряю ціни наново..."):
@@ -224,7 +263,7 @@ def render_trading_logic(res, prefix_key="dash"):
         actual_bundle_income = get_clean_income(user_sell_price)
         actual_pack_profit = actual_bundle_income - user_buy_price
         
-        st.info(f"Твій чистий дохід після комісії Steam: **{actual_bundle_income} ₴**")
+        st.info(f"Твій чистий дохід після комісії Steam (13%): **{actual_bundle_income} ₴**")
         
         if actual_pack_profit > 0: st.metric("Чистий Профіт", f"{actual_pack_profit} ₴", delta="Вигідно")
         else: st.metric("Чистий Профіт", f"{actual_pack_profit} ₴", delta="Збиток", delta_color="inverse")
@@ -244,11 +283,11 @@ def render_trading_logic(res, prefix_key="dash"):
     with tab2:
         col_in1, col_in2 = st.columns(2)
         user_bundle_buy = col_in1.number_input("За скільки КУПИВ цілий бандл (₴):", value=int(res['bundle_data']['price']), step=1, key=f"buy_unpack_{safe_key}")
-        actual_parts_income = col_in2.number_input("Твій сумарний ЧИСТИЙ дохід з деталей (₴):", value=int(res['total_parts_clean_income']), step=1, key=f"sell_unpack_norm_{safe_key}")
+        actual_parts_income = col_in2.number_input("Сума ЧИСТИХ доходів з деталей (₴):", value=int(res['total_parts_clean_income']), step=1, key=f"sell_unpack_norm_{safe_key}")
         
         actual_unpack_profit = actual_parts_income - user_bundle_buy
         
-        st.info(f"Сума чистого доходу береться з колонки 'Тобі' для кожної деталі: **{actual_parts_income} ₴**")
+        st.info(f"Сума чистого доходу (збирається з колонки 'Тобі'): **{actual_parts_income} ₴**")
         
         if actual_unpack_profit > 0: st.metric("Чистий Профіт", f"{actual_unpack_profit} ₴", delta="Вигідно")
         else: st.metric("Чистий Профіт", f"{actual_unpack_profit} ₴", delta="Збиток", delta_color="inverse")
@@ -309,7 +348,7 @@ def render_full_set_dashboard(res, prefix_key):
 # ==========================================
 with st.sidebar:
     st.title("🛠 Sedrik Dota Tool")
-    st.markdown("`v41.0 | Clean & Simple`")
+    st.markdown("`v42.0 | Added Steam Link in Library`")
     st.divider()
     menu_choice = st.radio("НАВІГАЦІЯ:", ["🔍 Сканер Сетів", "📚 Бібліотека", "💼 Портфель", "📊 Звіти (База)"])
     st.divider()
@@ -424,6 +463,12 @@ elif menu_choice == "📚 Бібліотека":
             with col_details:
                 st.subheader(selected_set['set_name'])
                 st.markdown(f"**Герой:** `{selected_set['hero']}` &nbsp;|&nbsp; **Рідкість:** `{selected_set['rarity']}`")
+                
+                # --- ДОДАНО КНОПКУ ПЕРЕХОДУ НА STEAM ---
+                st.write("")
+                st.markdown(f"<a href='{get_steam_client_url(selected_set['set_name'])}' style='display: inline-block; padding: 6px 15px; background-color: #1a2838; color: #66c0f4; text-decoration: none; border-radius: 4px; border: 1px solid #101822; margin-top: 5px; margin-bottom: 10px; width: 100%; text-align: center; font-weight: bold;'>Відкрити бандл у Steam 🔗</a>", unsafe_allow_html=True)
+                st.write("")
+                
                 if old_total_value > 0:
                     st.markdown(f"💸 **Остання відома сумарна вартість деталей:** `{old_total_value} ₴`")
                 
