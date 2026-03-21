@@ -170,7 +170,7 @@ def get_steam_price_data(item_name: str) -> dict:
     url = f"https://steamcommunity.com/market/priceoverview/?appid={STEAM_APP_ID_DOTA}&currency={CURRENCY_UAH}&market_hash_name={urllib.parse.quote(item_name)}"
     result = {"price": 0, "volume": 0}
     try:
-        res = session.get(url, timeout=10) # Використовуємо сесію для імітації браузера
+        res = session.get(url, timeout=10)
         if res.status_code == 200:
             data = res.json()
             if data.get("success"):
@@ -178,10 +178,9 @@ def get_steam_price_data(item_name: str) -> dict:
                     result["price"] = int(float(data["lowest_price"].replace("₴", "").replace(" ", "").replace(",", ".")))
                 if "volume" in data:
                     result["volume"] = int(data["volume"].replace(",", "")) * 7
-        # ЗБІЛЬШЕНИЙ ЧАС ОЧІКУВАННЯ, ЩОБ НЕ ЗЛОВИТИ БАН 429
         time.sleep(2.5) 
     except: 
-        time.sleep(3.0) # Якщо помилка - чекаємо ще довше
+        time.sleep(3.0) 
     return result
 
 # --- ФУНКЦІЇ МАЛЮВАННЯ ДАШБОРДІВ ---
@@ -190,10 +189,10 @@ def render_trading_logic(res, prefix_key="dash"):
     st.markdown("### 🧮 Розрахунок прибутку")
     
     if res['total_parts_price'] == 0 or res['bundle_data']['price'] == 0:
-        st.warning("⚠️ Steam повернув нульові ціни. Це означає, що у тебе тимчасовий блок запитів (Rate Limit). Зачекай пару хвилин і натисни кнопку нижче.")
+        st.warning("⚠️ **Обережно:** Steam повернув нульові ціни. Це означає, що у тебе тимчасовий блок запитів (Rate Limit). Зачекай пару хвилин і натисни кнопку нижче.")
         if st.button("🔄 Перегенерувати ціни (Зняти нулі)", type="primary", key=f"rescan_{safe_key}"):
             get_steam_price_data.clear()
-            with st.spinner("Обережно перевіряю ціни наново (з великими паузами)..."):
+            with st.spinner("Перевіряю ціни наново..."):
                 items = [p['Деталь'] for p in res['parts_data']]
                 res['bundle_data'] = get_steam_price_data(res['exact_name'])
                 res['parts_data'] = []
@@ -302,7 +301,7 @@ def render_full_set_dashboard(res, prefix_key, check_easter_egg=False):
 # ==========================================
 with st.sidebar:
     st.title("🛠 Sedrik Dota Tool")
-    st.markdown("`v28.0 | Sniper Scanner Edition`")
+    st.markdown("`v29.0 | Mega Showcase Edition`")
     st.divider()
     menu_choice = st.radio("НАВІГАЦІЯ:", ["🔍 Сканер Сетів", "🎲 Рандомна Вітрина", "📚 Бібліотека", "💼 Портфель", "📊 Звіти (База)"])
     st.divider()
@@ -360,16 +359,17 @@ if menu_choice == "🔍 Сканер Сетів":
         render_full_set_dashboard(st.session_state.dota_result, prefix_key="single_scan", check_easter_egg=True)
 
 # ==========================================
-# СТОРІНКА 1.5: РАНДОМНА ВІТРИНА (БЕЗПЕЧНА)
+# СТОРІНКА 1.5: РАНДОМНА ВІТРИНА (БЕЗПЕЧНА + РОЗШИРЕНА)
 # ==========================================
 elif menu_choice == "🎲 Рандомна Вітрина":
     st.header("🎲 Рандомна Вітрина (Безпечний пошук)")
-    st.markdown("Програма дістає випадкові сети і перевіряє **ТІЛЬКИ ціну бандлу**. Це береже твій IP від бану. Якщо ціна бандлу тобі подобається — тисни кнопку глибокого аналізу!")
+    st.markdown("Дістає випадкові сети і перевіряє **ТІЛЬКИ ціну бандлу**. Якщо ціна тобі подобається — тисни кнопку глибокого аналізу!")
     
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.info("💡 Шукаємо одразу 5 сетів для вітрини.")
+        showcase_limit = st.slider("Скільки сетів вивести на вітрину?", min_value=4, max_value=20, value=8, step=4)
     with col2:
+        st.write("") # Вирівнювання по висоті
         auto_scan_btn = st.button("🚀 Оновити вітрину", type="primary", use_container_width=True)
 
     if auto_scan_btn:
@@ -402,18 +402,16 @@ elif menu_choice == "🎲 Рандомна Вітрина":
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Шукаємо рівно 4 сети для вітрини
         for raw_name in raw_sets:
-            if len(preview_list) >= 4:
+            if len(preview_list) >= showcase_limit:
                 break
                 
-            status_text.text(f"🔍 Формую вітрину: перевіряю '{raw_name}'...")
+            status_text.text(f"🔍 Формую вітрину ({len(preview_list)}/{showcase_limit}): перевіряю '{raw_name}'...")
             
             exact_name = search_correct_page_name(raw_name)
             set_info = get_full_set_info(exact_name)
             
             if set_info["components"]:
-                # Беремо ТІЛЬКИ ціну бандлу (1 запит!)
                 bundle_data = get_steam_price_data(exact_name)
                 
                 preview_list.append({
@@ -421,59 +419,67 @@ elif menu_choice == "🎲 Рандомна Вітрина":
                     "set_info": set_info,
                     "bundle_price": bundle_data['price']
                 })
-                progress_bar.progress(len(preview_list) / 4)
+                progress_bar.progress(len(preview_list) / showcase_limit)
         
         status_text.empty()
         progress_bar.empty()
         
         st.session_state.preview_sets = preview_list
-        st.session_state.deep_scan_result = None # Скидаємо попередній глибокий скан
+        st.session_state.deep_scan_result = None 
         st.success("🎉 Вітрина оновлена!")
 
-    # МАЛЮЄМО ВІТРИНУ (4 картки в ряд)
+    # МАЛЮЄМО ВІТРИНУ (рядами по 4 картки)
     if st.session_state.preview_sets:
         st.subheader("🛍️ Твої знахідки:")
-        cols = st.columns(4)
         
-        for i, p_res in enumerate(st.session_state.preview_sets):
-            with cols[i]:
-                with st.container(border=True):
-                    # Картинка
-                    if p_res['set_info']["image_url"]:
-                        st.image(p_res['set_info']["image_url"], use_container_width=True)
-                    else:
-                        st.info("📷 Нема фото")
-                    
-                    # Назва та ціна
-                    st.markdown(f"**{p_res['exact_name']}**")
-                    st.markdown(f"💰 Ціна бандлу: **{p_res['bundle_price']} ₴**")
-                    
-                    # Кнопка для глибокого сканування
-                    if st.button("🔬 Аналізувати", key=f"deep_{i}_{p_res['exact_name']}", use_container_width=True):
-                        with st.spinner(f"Сканую всі деталі для {p_res['exact_name']}... (З безпечними паузами)"):
-                            items = p_res['set_info']["components"]
-                            parts_data = []
-                            total_parts_price = 0
-                            total_parts_clean_income = 0
+        for i in range(0, len(st.session_state.preview_sets), 4):
+            cols = st.columns(4)
+            for j in range(4):
+                if i + j < len(st.session_state.preview_sets):
+                    p_res = st.session_state.preview_sets[i + j]
+                    with cols[j]:
+                        with st.container(border=True):
+                            # ЗАХИЩЕНЕ ЗАВАНТАЖЕННЯ ФОТО
+                            if p_res['set_info']["image_url"]:
+                                try:
+                                    img_res = requests.get(p_res['set_info']["image_url"], headers=HEADERS, timeout=5)
+                                    if img_res.status_code == 200:
+                                        st.image(img_res.content, use_container_width=True)
+                                    else:
+                                        st.info("📷 Помилка фото")
+                                except:
+                                    st.info("📷 Помилка фото")
+                            else:
+                                st.info("📷 Нема фото")
                             
-                            for item in items:
-                                data = get_steam_price_data(item)
-                                clean_part = get_clean_income(data['price'])
-                                parts_data.append({"Деталь": item, "Ціна": data['price'], "Чистими": clean_part, "Продажі": data['volume'], "Link": get_steam_client_url(item)})
-                                total_parts_price += data['price']
-                                total_parts_clean_income += clean_part
-                                
-                            st.session_state.deep_scan_result = {
-                                "exact_name": p_res['exact_name'],
-                                "set_info": p_res['set_info'],
-                                "bundle_data": {"price": p_res['bundle_price'], "volume": 0},
-                                "parts_data": parts_data,
-                                "total_parts_price": total_parts_price,
-                                "total_parts_clean_income": total_parts_clean_income
-                            }
-                            st.rerun() # Перезавантажуємо сторінку, щоб показати результат нижче
+                            st.markdown(f"**{p_res['exact_name']}**")
+                            st.markdown(f"💰 Ціна бандлу: **{p_res['bundle_price']} ₴**")
+                            
+                            if st.button("🔬 Аналізувати", key=f"deep_{i+j}_{p_res['exact_name']}", use_container_width=True):
+                                with st.spinner(f"Сканую всі деталі для {p_res['exact_name']}..."):
+                                    items = p_res['set_info']["components"]
+                                    parts_data = []
+                                    total_parts_price = 0
+                                    total_parts_clean_income = 0
+                                    
+                                    for item in items:
+                                        data = get_steam_price_data(item)
+                                        clean_part = get_clean_income(data['price'])
+                                        parts_data.append({"Деталь": item, "Ціна": data['price'], "Чистими": clean_part, "Продажі": data['volume'], "Link": get_steam_client_url(item)})
+                                        total_parts_price += data['price']
+                                        total_parts_clean_income += clean_part
+                                        
+                                    st.session_state.deep_scan_result = {
+                                        "exact_name": p_res['exact_name'],
+                                        "set_info": p_res['set_info'],
+                                        "bundle_data": {"price": p_res['bundle_price'], "volume": 0},
+                                        "parts_data": parts_data,
+                                        "total_parts_price": total_parts_price,
+                                        "total_parts_clean_income": total_parts_clean_income
+                                    }
+                                st.rerun()
 
-    # ЯКЩО НАТИСНУЛИ "АНАЛІЗУВАТИ" - МАЛЮЄМО ПОВНИЙ ДАШБОРД ПІД ВІТРИНОЮ
+    # ПОВНИЙ ДАШБОРД ПІД ВІТРИНОЮ
     if st.session_state.deep_scan_result:
         st.divider()
         st.subheader("🎯 Результати глибокого аналізу:")
