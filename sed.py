@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import time
+import random
 import urllib.parse
 from bs4 import BeautifulSoup
 import psycopg2
@@ -9,7 +10,6 @@ import pandas as pd
 from datetime import datetime
 import json
 import os
-import random
 
 # --- НАЛАШТУВАННЯ СТОРІНКИ ---
 st.set_page_config(
@@ -168,14 +168,13 @@ def get_full_set_info(exact_page_name: str) -> dict:
     except: pass
     return result
 
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_hero_sets(hero_name: str) -> list:
-    # Форматуємо ім'я (напр. "nature's prophet" -> "Nature's_Prophet", "anti-mage" -> "Anti-Mage")
     formatted_name = hero_name.strip().title().replace(" ", "_").replace("'S", "'s")
     page_name = f"{formatted_name}/Equipment"
     url = "https://liquipedia.net/dota2/api.php"
     
-    # Тепер ми запитуємо ВСЮ сторінку одразу, без пошуку конкретних секцій
     params = {
         "action": "parse", 
         "page": page_name, 
@@ -183,46 +182,56 @@ def get_hero_sets(hero_name: str) -> list:
         "format": "json"
     }
     
-    sets = []
+    sets = set() 
     try:
-        res = session.get(url, params=params, timeout=10)
+        custom_headers = HEADERS.copy()
+        custom_headers['User-Agent'] = 'SedrikDotaTool/1.0 (Arbitration tool)'
+        
+        res = session.get(url, params=params, headers=custom_headers, timeout=10)
         data = res.json()
         
-        if "error" in data: 
+        if "error" in data:
             return []
             
         soup = BeautifulSoup(data["parse"]["text"]["*"], "html.parser")
         
-        # На Liquipedia предмети лежать у таблицях, зазвичай у першій колонці
+        # Проходимося по всіх рядках таблиці
         for row in soup.find_all("tr"):
-            td = row.find("td")
-            if td:
-                a_tag = td.find("a")
-                if a_tag and a_tag.has_attr("title"):
-                    title = a_tag["title"]
-                    # Відсіюємо службові лінки і дублікати
-                    if "edit" not in title.lower() and title not in sets:
-                        sets.append(title)
+            # Дивимося на назву рядка (ліва колонка)
+            row_header = row.find(['th', 'td'])
+            
+            # Якщо рядок називається "Sets" або "Bundles"
+            if row_header and row_header.get_text(strip=True).lower() in ['sets', 'bundles']:
+                
+                # Тоді ми беремо ВСІ посилання (find_all), які є в цьому рядку
+                for a_tag in row.find_all("a"):
+                    if a_tag.has_attr("title"):
+                        title = a_tag["title"]
+                        title_lower = title.lower()
                         
+                        # Відсіюємо службові кнопки "Edit"
+                        if "edit" not in title_lower and title.lower() != hero_name.lower():
+                            sets.add(title)
+                            
     except Exception as e:
         import streamlit as st
-        st.error(f"Помилка парсингу сторінки: {e}")
+        st.error(f"Помилка парсингу API Liquipedia: {e}")
         
-    return sets
-
+    return list(sets)
 @st.cache_data(ttl=300, show_spinner=False)
 def get_steam_price_data(item_name: str) -> dict:
     url = f"https://steamcommunity.com/market/priceoverview/?appid={STEAM_APP_ID_DOTA}&currency={CURRENCY_UAH}&market_hash_name={urllib.parse.quote(item_name)}&l=english"
     result = {"price": 0, "volume": 0}
     try:
         res = session.get(url, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            if data.get("success"):
-                if "lowest_price" in data:
-                    result["price"] = int(float(data["lowest_price"].replace("₴", "").replace(" ", "").replace(",", ".")))
-                if "volume" in data:
-                    result["volume"] = int(data["volume"].replace(",", "")) * 7
+        
+        # ДОДАЄМО ПЕРЕВІРКУ НА БАН
+        if res.status_code == 429:
+            import streamlit as st
+            st.error(f"🚨 Steam тимчасово заблокував IP (Rate Limit) на предметі: {item_name}. Зміни IP або зачекай.")
+            time.sleep(10.0) # Робимо велику паузу, щоб не погіршити бан
+            return result
+            
         if res.status_code == 200:
             data = res.json()
             if data.get("success"):
@@ -231,15 +240,11 @@ def get_steam_price_data(item_name: str) -> dict:
                 if "volume" in data:
                     result["volume"] = int(data["volume"].replace(",", "")) * 7
         
-        # Плаваюча затримка від 3.5 до 6.2 секунд (виглядає як поведінка людини)
         time.sleep(random.uniform(3.5, 6.2)) 
-        
     except Exception as e:
         import streamlit as st
         st.error(f"Помилка з'єднання зі Steam для {item_name}: {repr(e)}")
-        # При помилці чекаємо довше, щоб не спамити під час бану
-        time.sleep(random.uniform(5.0, 8.0)) 
-        
+        time.sleep(random.uniform(6.0, 10.0)) 
     return result
 
 # --- ФУНКЦІЇ МАЛЮВАННЯ ДАШБОРДІВ ---
@@ -282,7 +287,6 @@ def render_trading_logic(res, prefix_key="dash"):
         actual_bundle_income = get_clean_income(user_sell_price)
         actual_pack_profit = actual_bundle_income - user_buy_price
         
-        # Розрахунок автопокупки бандлу
         instant_bundle_gross = int(user_sell_price * 0.85)
         instant_bundle_clean = get_clean_income(instant_bundle_gross)
         instant_bundle_profit = instant_bundle_clean - user_buy_price
@@ -316,7 +320,6 @@ def render_trading_logic(res, prefix_key="dash"):
         
         actual_unpack_profit = actual_parts_income - user_bundle_buy
         
-        # Достаємо загальний чистий дохід автопокупки
         total_instant = res.get('total_instant_clean', 0)
         instant_unpack_profit = total_instant - user_bundle_buy
         
@@ -422,7 +425,6 @@ if menu_choice == "🔍 Сканер Сетів":
                     status_text.text(f"Сканування ({i+1}/{len(items)}): {item}")
                     data = get_steam_price_data(item)
                     
-                    # Розрахунок стандартного і автопродажу
                     clean_part = get_clean_income(data['price'])
                     instant_gross = int(data['price'] * 0.85)
                     instant_clean = get_clean_income(instant_gross)
@@ -462,7 +464,6 @@ elif menu_choice == "🦸‍♂️ Сканер Героя":
     hero_query = col_input.text_input("Ім'я героя:", placeholder="Dawnbreaker", label_visibility="collapsed")
     find_sets_btn = col_btn.button("🔍 Знайти сети", type="primary", use_container_width=True)
     
-    # Ініціалізація змінних у сесії для масового сканування
     if 'hero_sets_list' not in st.session_state: st.session_state.hero_sets_list = []
     if 'bulk_detailed_results' not in st.session_state: st.session_state.bulk_detailed_results = {}
     if 'bulk_summary_df' not in st.session_state: st.session_state.bulk_summary_df = pd.DataFrame()
@@ -476,11 +477,9 @@ elif menu_choice == "🦸‍♂️ Сканер Героя":
         else:
             st.success(f"✅ Знайдено сетів: {len(found_sets)}")
             st.session_state.hero_sets_list = found_sets
-            # Очищаємо попередні результати при новому пошуку
             st.session_state.bulk_detailed_results = {}
             st.session_state.bulk_summary_df = pd.DataFrame()
 
-    # Якщо сети знайдені, показуємо кнопку для старту сканування
     if st.session_state.hero_sets_list:
         st.write(f"**Список сетів до сканування:** {', '.join(st.session_state.hero_sets_list)}")
         
@@ -500,12 +499,10 @@ elif menu_choice == "🦸‍♂️ Сканер Героя":
                 set_info = get_full_set_info(exact_name)
                 
                 if not set_info["components"]:
-                    continue # Пропускаємо, якщо немає деталей
+                    continue 
                 
-                # Парсимо бандл
                 bundle_data = get_steam_price_data(exact_name)
                 
-                # Детальний збір цін деталей (так само, як в одиночному сканері)
                 parts_data = []
                 total_parts_price = 0
                 total_parts_clean = 0
@@ -529,7 +526,6 @@ elif menu_choice == "🦸‍♂️ Сканер Героя":
                 
                 unpack_profit = total_parts_clean - bundle_data['price']
                 
-                # Зберігаємо короткий результат для загальної таблиці
                 bulk_results.append({
                     "Сет": exact_name,
                     "Деталей": len(set_info["components"]),
@@ -539,7 +535,6 @@ elif menu_choice == "🦸‍♂️ Сканер Героя":
                     "Профіт Розпаковки (₴)": unpack_profit
                 })
                 
-                # Зберігаємо ПОВНИЙ результат для дашборду у пам'ять
                 st.session_state.bulk_detailed_results[exact_name] = {
                     "exact_name": exact_name, "set_info": set_info, "bundle_data": bundle_data,
                     "parts_data": parts_data, "total_parts_price": total_parts_price,
@@ -558,21 +553,18 @@ elif menu_choice == "🦸‍♂️ Сканер Героя":
                 df_bulk = df_bulk.sort_values(by="Профіт Розпаковки (₴)", ascending=False)
                 st.session_state.bulk_summary_df = df_bulk
 
-        # Відмальовуємо таблицю та дашборд, якщо дані вже є в пам'яті
         if not st.session_state.bulk_summary_df.empty:
             st.subheader("📊 Результати сканування")
-            st.dataframe(st.session_state.bulk_summary_df.style.applymap(lambda x: 'color: #a3e635' if x > 0 else 'color: #ff4b4b', subset=['Профіт Розпаковки (₴)']), hide_index=True, use_container_width=True)
+            # Використовуємо .map замість .applymap для сумісності з новими версіями pandas
+            st.dataframe(st.session_state.bulk_summary_df.style.map(lambda x: 'color: #a3e635' if x > 0 else 'color: #ff4b4b', subset=['Профіт Розпаковки (₴)']), hide_index=True, use_container_width=True)
             
             st.divider()
             st.subheader("🔎 Детальний огляд сету")
             st.markdown("Вибери будь-який сет із таблиці, щоб переглянути всі його компоненти та додати до Бібліотеки чи Портфеля.")
             
-            # Випадаючий список для вибору сету
             selected_bulk_set = st.selectbox("Обери сет:", st.session_state.bulk_summary_df["Сет"].tolist(), label_visibility="collapsed")
             
-            # Якщо сет вибрано, відмальовуємо його детальний дашборд
             if selected_bulk_set and selected_bulk_set in st.session_state.bulk_detailed_results:
-                # Використовуємо унікальний prefix_key, щоб кнопки не конфліктували
                 render_full_set_dashboard(st.session_state.bulk_detailed_results[selected_bulk_set], prefix_key=f"bulk_{selected_bulk_set}")
 
 # ==========================================
@@ -769,4 +761,3 @@ elif menu_choice == "📊 Звіти (База)":
                     conn.cursor().execute("DELETE FROM trades WHERE id = %s", (int(del_trade_id),))
                     conn.commit(); conn.close()
                     st.success("Видалено!"); time.sleep(1); st.rerun()
-
