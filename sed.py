@@ -464,9 +464,13 @@ elif menu_choice == "🦸‍♂️ Сканер Героя":
     hero_query = col_input.text_input("Ім'я героя:", placeholder="Dawnbreaker", label_visibility="collapsed")
     find_sets_btn = col_btn.button("🔍 Знайти сети", type="primary", use_container_width=True)
     
+    # --- 1. Оголошення змінних стану ---
     if 'hero_sets_list' not in st.session_state: st.session_state.hero_sets_list = []
     if 'bulk_detailed_results' not in st.session_state: st.session_state.bulk_detailed_results = {}
     if 'bulk_summary_df' not in st.session_state: st.session_state.bulk_summary_df = pd.DataFrame()
+    # Нові змінні для керування довгими циклами
+    if 'is_bulk_scanning' not in st.session_state: st.session_state.is_bulk_scanning = False
+    if 'temp_bulk_results' not in st.session_state: st.session_state.temp_bulk_results = []
     
     if find_sets_btn and hero_query:
         with st.spinner("Шукаю сети на Liquipedia..."):
@@ -477,32 +481,46 @@ elif menu_choice == "🦸‍♂️ Сканер Героя":
         else:
             st.success(f"✅ Знайдено сетів: {len(found_sets)}")
             st.session_state.hero_sets_list = found_sets
+            # Очищаємо всі старі результати при новому пошуку
             st.session_state.bulk_detailed_results = {}
             st.session_state.bulk_summary_df = pd.DataFrame()
+            st.session_state.is_bulk_scanning = False
+            st.session_state.temp_bulk_results = []
 
     if st.session_state.hero_sets_list:
         st.write(f"**Список сетів до сканування:** {', '.join(st.session_state.hero_sets_list)}")
         
-        if st.button("🚀 Розпочати глибокий скан (Обережно, займає час!)", type="primary"):
-            st.warning("⚠️ Не перемикай сторінку. Відправляю запити з паузами, щоб Steam не заблокував IP...")
+        # --- 2. Кнопка тепер лише вмикає тригер сканування ---
+        if st.button("🚀 Розпочати глибокий скан", type="primary", disabled=st.session_state.is_bulk_scanning):
+            st.session_state.is_bulk_scanning = True
+            st.session_state.temp_bulk_results = [] # Скидаємо тимчасовий прогрес
+            st.session_state.bulk_detailed_results = {}
+            st.rerun() # Перезапускаємо скрипт, щоб він увійшов у блок сканування
+
+        # --- 3. Блок сканування працює від стану, а не від кнопки ---
+        if st.session_state.is_bulk_scanning:
+            st.warning("⚠️ Сканування в процесі. Зберігаємо прогрес на льоту. Якщо сторінка перезавантажиться — скрипт продовжить роботу автоматично.")
             
             progress_bar = st.progress(0)
             status_text = st.empty()
-            
-            bulk_results = []
-            st.session_state.bulk_detailed_results = {}
+            total_sets = len(st.session_state.hero_sets_list)
             
             for index, set_name in enumerate(st.session_state.hero_sets_list):
-                status_text.text(f"Сканую сет ({index+1}/{len(st.session_state.hero_sets_list)}): {set_name}")
-                
+                # --- CHECKPOINT: Перевіряємо, чи цей сет вже проскановано ---
+                # Це захистить від втрати прогресу, якщо Streamlit розірве з'єднання
                 exact_name = search_correct_page_name(set_name)
+                if any(r["Сет"] == exact_name for r in st.session_state.temp_bulk_results):
+                    progress_bar.progress((index + 1) / total_sets)
+                    continue # Пропускаємо, бо вже просканували раніше
+                
+                status_text.text(f"Сканую сет ({index+1}/{total_sets}): {set_name}")
                 set_info = get_full_set_info(exact_name)
                 
                 if not set_info["components"]:
+                    progress_bar.progress((index + 1) / total_sets)
                     continue 
                 
                 bundle_data = get_steam_price_data(exact_name)
-                
                 parts_data = []
                 total_parts_price = 0
                 total_parts_clean = 0
@@ -526,7 +544,8 @@ elif menu_choice == "🦸‍♂️ Сканер Героя":
                 
                 unpack_profit = total_parts_clean - bundle_data['price']
                 
-                bulk_results.append({
+                # --- Зберігаємо прогрес одразу в глобальний стан ---
+                st.session_state.temp_bulk_results.append({
                     "Сет": exact_name,
                     "Деталей": len(set_info["components"]),
                     "Ціна Бандлу (Брутто ₴)": bundle_data['price'],
@@ -542,31 +561,34 @@ elif menu_choice == "🦸‍♂️ Сканер Героя":
                     "total_instant_clean": total_instant_clean
                 }
                 
-                progress_bar.progress((index + 1) / len(st.session_state.hero_sets_list))
+                progress_bar.progress((index + 1) / total_sets)
             
+            # --- Завершення ---
             status_text.success("✅ Сканування завершено!")
-            time.sleep(1)
-            status_text.empty(); progress_bar.empty()
             
-            if bulk_results:
-                df_bulk = pd.DataFrame(bulk_results)
+            # Переносимо дані з тимчасового масиву у фінальний DataFrame
+            if st.session_state.temp_bulk_results:
+                df_bulk = pd.DataFrame(st.session_state.temp_bulk_results)
                 df_bulk = df_bulk.sort_values(by="Профіт Розпаковки (₴)", ascending=False)
                 st.session_state.bulk_summary_df = df_bulk
+                
+            st.session_state.is_bulk_scanning = False # Вимикаємо тригер
+            time.sleep(1)
+            st.rerun() # Оновлюємо інтерфейс для відображення таблиці
 
+        # --- 4. Відмальовування результатів ---
         if not st.session_state.bulk_summary_df.empty:
             st.subheader("📊 Результати сканування")
-            # Використовуємо .map замість .applymap для сумісності з новими версіями pandas
             st.dataframe(st.session_state.bulk_summary_df.style.map(lambda x: 'color: #a3e635' if x > 0 else 'color: #ff4b4b', subset=['Профіт Розпаковки (₴)']), hide_index=True, use_container_width=True)
             
             st.divider()
             st.subheader("🔎 Детальний огляд сету")
-            st.markdown("Вибери будь-який сет із таблиці, щоб переглянути всі його компоненти та додати до Бібліотеки чи Портфеля.")
+            st.markdown("Вибери будь-який сет із таблиці, щоб переглянути всі його компоненти.")
             
             selected_bulk_set = st.selectbox("Обери сет:", st.session_state.bulk_summary_df["Сет"].tolist(), label_visibility="collapsed")
             
             if selected_bulk_set and selected_bulk_set in st.session_state.bulk_detailed_results:
                 render_full_set_dashboard(st.session_state.bulk_detailed_results[selected_bulk_set], prefix_key=f"bulk_{selected_bulk_set}")
-
 # ==========================================
 # СТОРІНКА 2: БІБЛІОТЕКА СЕТІВ
 # ==========================================
